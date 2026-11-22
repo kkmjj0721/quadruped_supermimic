@@ -14,7 +14,6 @@ import importlib
 import math
 import sys
 from importlib import metadata
-from pathlib import Path
 
 
 def check_install(device: str) -> None:
@@ -31,21 +30,9 @@ def check_install(device: str) -> None:
         ("warp-lang", "warp"),
         ("torch", "torch"),
         ("torchvision", "torchvision"),
-        ("rsl-rl-lib", "rsl_rl"),
-        ("rsl-rl-lib", "rsl_rl.models"),
-        ("rsl-rl-lib", "rsl_rl.runners"),
     ):
         modules[module_name] = importlib.import_module(module_name)
         print(f"Imported {module_name} ({distribution} {metadata.version(distribution)})")
-
-    # 脚本从 tools/ 启动时显式加入仓库根目录，并检查算法确实来自本地源码。
-    project_root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(project_root))
-    for module_name in ("agents.base", "agents.base.algorithms", "agents.base.models", "agents.base.runners"):
-        module = importlib.import_module(module_name)
-        if not Path(module.__file__).resolve().is_relative_to(project_root / "agents"):
-            raise RuntimeError(f"Local algorithm module resolved outside this project: {module_name}.")
-        print(f"Imported local algorithm module {module_name}: {module.__file__}")
 
     mujoco = modules["mujoco"]
     model = mujoco.MjModel.from_xml_string(

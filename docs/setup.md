@@ -2,7 +2,7 @@
 
 文中的本地工作记录位于 `docs/work/`，不随仓库提交。
 
-本项目参考相邻 `legged_wbc_mjlab` 的 uv 安装方式，单独维护依赖声明、锁文件和 `.venv`。当前已提供环境安装与检查入口，基础 PPO 已迁入 `agents/base/`，机器人训练入口、评估和任务逻辑仍待开发。
+本项目参考相邻 `legged_wbc_mjlab` 的 uv 安装方式，单独维护依赖声明、锁文件和 `.venv`。当前提供环境安装、检查和 Go2 SuperMimic 训练入口。
 
 ## 环境与版本
 
@@ -13,16 +13,14 @@
 | Python | `.python-version` 固定为 3.11.16，由 uv 准备 |
 | uv | 至少 0.8.0；本机验证使用 0.12.10 |
 | MjLab | `mjlab==1.6.0`，来自 PyPI |
-| 基础 PPO | 本地 `agents/base/`，从参考仓库的 RSL-RL 5.4.2 精简迁移 |
-| RSL-RL 发行依赖 | `rsl-rl-lib==5.4.2`，保留供 MjLab 使用；项目算法使用本地 `agents` |
-| TensorDict | `tensordict>=0.7.0`，算法直接使用；实际版本记录在 `uv.lock` |
+| MjLab 传递依赖 | 由 MjLab 声明并记录在 `uv.lock`，不作为本项目训练接口 |
 | PyTorch | `torch==2.14.1`，按后端使用官方 CPU 或 cu130 wheel |
 | torchvision | `torchvision==0.29.1`，与 PyTorch 使用相同后端 |
 | 其他依赖 | 完整版本与下载校验信息记录于 `uv.lock` |
 
 截至 2026-10-25，本机为 Ubuntu 22.04.5、RTX 4060 8 GiB、NVIDIA 驱动 580.159.03、CUDA Toolkit 13.0，安装入口会自动选择 `cu130`。
 
-项目算法统一从本地 `agents` 导入，目前仅包含前馈基础 PPO；参考仓库的 HIM 等扩展未迁移。保留上游 RSL-RL 发行包以满足 MjLab 的依赖，不建立同名遮蔽包或相邻仓库路径依赖。用法及维护边界见 [算法说明](../agents/README.md)，来源见 [迁移记录](../agents/base/NOTICE.md)。
+项目算法统一从本地 `agents` 导入，目前仅包含 SuperMimic。MjLab 的传递依赖仍由锁文件解析，但本项目不提供 RSL-RL/PPO 训练入口。用法及维护边界见 [算法说明](../agents/README.md)。
 
 ## 安装与检查
 
@@ -38,7 +36,7 @@ uv run --no-sync python -B tools/check_install.py --device cuda
 
 上面的 `export PATH` 让当前终端找到默认安装到 `~/.local/bin` 的 uv；子进程安装工具后不能修改父终端的 PATH。后续终端可在自己的 Shell 配置中保留该目录，或按 uv 官方安装器的提示加载环境。
 
-检查工具验证核心依赖、RSL-RL 子模块及本地 `agents.base` 导入路径、MuJoCo 简单模型加载与步进、PyTorch 张量运算和 torchvision NMS。CUDA 模式还验证 Warp 的 CUDA 设备分配与数据传输；任一失败返回非零退出码。此检查不包含训练、策略效果或图形窗口验证。
+检查工具验证核心依赖、MuJoCo 简单模型加载与步进、PyTorch 张量运算和 torchvision NMS。CUDA 模式还验证 Warp 的 CUDA 设备分配与数据传输；任一失败返回非零退出码。此检查不包含训练、策略效果或图形窗口验证。
 
 查看参数：
 

@@ -2,11 +2,10 @@
 
 基于 **MjLab** 的四足机器人运动控制项目，面向 **Unitree Go2**，支持平地与粗糙地形的速度跟踪、策略训练、可视化播放和策略导出。
 
-提供 PPO 速度跟踪任务与 SuperMimic 盲速度跟踪任务。SuperMimic 使用混合专家历史策略与可微世界模型；Go2 PPO 任务使用 MjLab / RSL-RL 运行器。
+提供 SuperMimic 盲速度跟踪任务，使用混合专家历史策略与可微世界模型。
 
 | 算法 | 平地任务 | 粗糙地形任务 |
 | --- | --- | --- |
-| PPO | `Unitree-Go2-Flat` | `Unitree-Go2-Rough` |
 | SuperMimic | `Unitree-Go2-SuperMimic-Flat` | `Unitree-Go2-SuperMimic-Rough` |
 
 ## 🚀 快速开始
@@ -24,10 +23,6 @@ uv run --no-sync python -B tools/check_install.py --device cuda
 ## 🧠 训练
 
 ```bash
-# PPO：平地速度跟踪
-uv run --no-sync python scripts/train.py Unitree-Go2-Flat \
-  --env.scene.num-envs 4096 --agent.max-iterations 10001
-
 # SuperMimic：平地盲速度跟踪
 uv run --no-sync python scripts/train.py Unitree-Go2-SuperMimic-Flat \
   --device cuda:0 --num-envs 64 --max-iterations 1000
@@ -37,7 +32,6 @@ uv run --no-sync python scripts/train.py Unitree-Go2-SuperMimic-Flat \
 
 默认产物目录：
 
-- **PPO**：`logs/rsl_rl/go2_ppo/<运行标识>/`
 - **SuperMimic**：`logs/supermimic/go2_supermimic/<运行标识>/`
 
 ## 🎮 策略播放
@@ -45,10 +39,6 @@ uv run --no-sync python scripts/train.py Unitree-Go2-SuperMimic-Flat \
 将检查点路径替换为实际文件，并选择与训练一致的任务：
 
 ```bash
-# 播放 PPO 策略
-uv run --no-sync python scripts/play.py Unitree-Go2-Flat \
-  --checkpoint-file '<实验目录>/model_1000.pt' --num-envs 1
-
 # 播放 SuperMimic 策略
 uv run --no-sync python scripts/play.py Unitree-Go2-SuperMimic-Flat \
   --checkpoint-file '<实验目录>/model_1000.pt' --num-envs 1
@@ -64,16 +54,15 @@ uv run --no-sync python scripts/play.py Unitree-Go2-SuperMimic-Flat \
 src/tasks/   # 任务环境、奖励与课程
 src/config/  # 机器人与任务配置
 src/assets/  # 机器人模型与场景资源
-agents/      # 基础 PPO 组件与 SuperMimic 算法
+agents/      # SuperMimic 算法
 scripts/     # 训练与播放入口
-tools/       # 安装检查与策略导出
+tools/       # 训练环境安装与检查
 docs/        # 安装与任务用法
 ```
 
 ## 文档与许可
 
 - [SuperMimic 任务指南](docs/go2_supermimic.md)：配置、续训、评估与导出。
-- [Go1 深度 SuperMimic](docs/go1_depth_supermimic.md)：四足视觉查询、单路MLP与4096环境训练。
 - [算法说明](agents/README.md)：算法组件、接口与来源。
 - [Go2 配置](src/config/go2/)：机器人、控制与任务参数。
 

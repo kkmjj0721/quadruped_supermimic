@@ -1,37 +1,35 @@
 # Copyright (c) 2026-2027 zh
 """
 内容：
-    按任务 ID 加载本地策略检查点，或使用零动作、随机动作查看仿真环境。
+    播放 Go2 SuperMimic 检查点，或使用零动作、随机动作查看任务环境。
 
 用法：
-    python scripts/play.py Unitree-Go2-Flat --checkpoint-file logs/rsl_rl/go2_ppo/实验目录/model_100.pt
     python scripts/play.py Unitree-Go2-SuperMimic-Rough --checkpoint-file logs/supermimic/go2_supermimic/实验目录/model_100.pt
-    python -m scripts.play Unitree-Go2-Flat --agent zero --num-envs 1 --viewer viser
+    python -m scripts.play Unitree-Go2-SuperMimic-Flat --agent zero --num-envs 1 --viewer viser
 """
 
 from __future__ import annotations
 
 import os
-import sys
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
+import sys
 from typing import Literal
 
 # 直接执行脚本时也从当前项目导入任务，不依赖外部 PYTHONPATH。
-if __package__ in (None, ""):
+if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.runtime import configure_dependency_warnings
+
+configure_dependency_warnings()
 
 import mjlab
 import torch
 import tyro
 
-from mjlab.envs import ManagerBasedRlEnv
-from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.utils.torch import configure_torch_backends
-from mjlab.utils.wrappers import VideoRecorder
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
-
-SUPERMIMIC_PREFIX = "Unitree-Go2-SuperMimic-"
 
 
 @dataclass(frozen=True)
@@ -51,11 +49,23 @@ class PlayConfig:
     """关闭所有终止条件，便于持续观察。"""
 
 
-def load_runner_cls(task_id: str):
-    """仅PPO分支读取注册表，保持SuperMimic任务独立。"""
-    from mjlab.tasks.registry import load_runner_cls as load
+def _print_help(stream) -> None:
+    """显示项目当前支持的播放任务。"""
+    from src.tasks.locomotion.go2_supermimic.config.train_cfg import TASK_MODES
 
-    return load(task_id)
+    print(f"usage: {sys.argv[0]} TASK [OPTIONS]", file=stream)
+    print(f"Run '{sys.argv[0]} TASK --help' for playback options.", file=stream)
+    print("Available tasks:", file=stream)
+    for task in sorted(TASK_MODES):
+        print(f"  {task}", file=stream)
+
+
+def _validate_task(task_id: str) -> None:
+    """拒绝项目未提供的播放任务。"""
+    from src.tasks.locomotion.go2_supermimic.config.train_cfg import TASK_MODES
+
+    if task_id not in TASK_MODES:
+        raise ValueError(f"Unsupported playback task: {task_id}")
 
 
 def _validate_config(cfg: PlayConfig) -> None:
@@ -72,30 +82,19 @@ def _validate_config(cfg: PlayConfig) -> None:
         raise ValueError("video_length must be positive when recording video.")
 
 
-def run_viewer(env, policy, cfg: PlayConfig, device: str, *, viewer_classes=None) -> None:
+def run_viewer(env, policy, cfg: PlayConfig, device: str) -> None:
     """按显示环境选择原生窗口或浏览器查看器，结束后由调用方关闭环境。"""
     viewer = cfg.viewer
     if viewer == "auto":
         has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
         viewer = "native" if has_display else "viser"
     print(f"[INFO] Playing with: device={device}, viewer={viewer}", flush=True)
-    classes = viewer_classes or {"native": NativeMujocoViewer, "viser": ViserPlayViewer}
-    viewer_cls = classes[viewer]
+    viewer_cls = {"native": NativeMujocoViewer, "viser": ViserPlayViewer}[viewer]
     viewer_cls(env, policy).run()
 
 
-def supermimic_task(task_id: str | None) -> bool:
-    """SuperMimic 播放使用自己的检查点与历史适配，不进入PPO注册表。"""
-    if task_id is None or not task_id.startswith(SUPERMIMIC_PREFIX):
-        return False
-    from src.tasks.locomotion.go2_supermimic.config.train_cfg import TASK_MODES
-
-    if task_id not in TASK_MODES:
-        raise ValueError(f"Unknown Go2 SuperMimic task: {task_id}")
-    return True
-
-
 def _resolve_checkpoint(cfg: PlayConfig) -> Path | None:
+    """解析训练策略需要的检查点；虚拟策略不读取文件。"""
     if cfg.agent != "trained":
         return None
     if cfg.checkpoint_file is None:
@@ -107,16 +106,15 @@ def _resolve_checkpoint(cfg: PlayConfig) -> Path | None:
     return checkpoint
 
 
-def _run_supermimic(task_id: str, cfg: PlayConfig, checkpoint: Path | None, device: str) -> None:
-    """只装配任务侧播放接口、可选录像和查看器。"""
-    viewer_classes = None
-    if task_id.startswith("Unitree-Go1-Depth-SuperMimic-"):
-        from src.tasks.locomotion.go1_depth.playback import make_playback_env
-        from src.tasks.locomotion.go1_depth.viewer import Go1DepthNativeViewer, Go1DepthViserViewer
+def run_play(task_id: str, cfg: PlayConfig) -> None:
+    """装配 SuperMimic 播放环境和策略，并确保退出时关闭环境。"""
+    _validate_task(task_id)
+    _validate_config(cfg)
+    checkpoint = _resolve_checkpoint(cfg)
+    configure_torch_backends()
+    device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
 
-        viewer_classes = {"native": Go1DepthNativeViewer, "viser": Go1DepthViserViewer}
-    else:
-        from src.tasks.locomotion.go2_supermimic.rl.playback import make_playback_env
+    from src.tasks.locomotion.go2_supermimic.rl.playback import make_playback_env
 
     env, policy = make_playback_env(
         task_id, checkpoint_file=checkpoint, agent=cfg.agent, num_envs=cfg.num_envs, device=device,
@@ -126,112 +124,24 @@ def _run_supermimic(task_id: str, cfg: PlayConfig, checkpoint: Path | None, devi
     try:
         if cfg.no_terminations:
             print("[INFO] Terminations disabled.")
-        run_viewer(env, policy, cfg, device, viewer_classes=viewer_classes)
-    finally:
-        env.close()
-
-
-def run_play(task_id: str, cfg: PlayConfig) -> None:
-    """装配播放环境和策略，并在查看器退出或失败后关闭环境。"""
-    _validate_config(cfg)
-    checkpoint = _resolve_checkpoint(cfg)
-    configure_torch_backends()
-    device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
-    if task_id.startswith("Unitree-Go1-Depth-SuperMimic-") or supermimic_task(task_id):
-        _run_supermimic(task_id, cfg, checkpoint, device)
-        return
-
-    from src.tasks import register_tasks
-    from mjlab.tasks.registry import load_env_cfg, load_rl_cfg
-
-    register_tasks()
-    env_cfg = load_env_cfg(task_id, play=True)
-    agent_cfg = load_rl_cfg(task_id)
-    if cfg.no_terminations:
-        env_cfg.terminations = {}
-        print("[INFO] Terminations disabled.")
-    if cfg.num_envs is not None:
-        env_cfg.scene.num_envs = cfg.num_envs
-    if cfg.video_height is not None:
-        env_cfg.viewer.height = cfg.video_height
-    if cfg.video_width is not None:
-        env_cfg.viewer.width = cfg.video_width
-
-    trained = checkpoint is not None
-    record_video = trained and cfg.video
-    if cfg.video and not trained:
-        print("[WARN] Video recording with dummy agents is disabled (no checkpoint/log_dir).")
-
-    env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode="rgb_array" if record_video else None)
-    try:
-        if record_video:
-            env = VideoRecorder(
-                env,
-                video_folder=checkpoint.parent / "videos" / "play",
-                step_trigger=lambda step: step == 0,
-                video_length=cfg.video_length,
-                disable_logger=True,
-            )
-            print("[INFO] Recording videos during play.")
-        env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
-
-        if trained:
-            runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
-            runner = runner_cls(env, asdict(agent_cfg), device=device)
-            runner.load(str(checkpoint), load_cfg={"actor": True}, strict=True, map_location=device)
-            policy = runner.get_inference_policy(device=device)
-        else:
-            action_shape = env.unwrapped.action_space.shape
-
-            def policy(obs) -> torch.Tensor:
-                """按实际动作空间生成零动作或均匀随机动作。"""
-                del obs
-                if cfg.agent == "zero":
-                    return torch.zeros(action_shape, device=env.unwrapped.device)
-                return 2 * torch.rand(action_shape, device=env.unwrapped.device) - 1
-
         run_viewer(env, policy, cfg, device)
     finally:
         env.close()
 
 
 def main() -> None:
-    """按任务协议分派，SuperMimic不经过PPO注册表。"""
-    task_argument = sys.argv[1] if len(sys.argv) > 1 else None
-    if (task_argument is not None and task_argument.startswith("Unitree-Go1-Depth-SuperMimic-")) or supermimic_task(task_argument):
-        cfg = tyro.cli(PlayConfig, args=sys.argv[2:], prog=f"{sys.argv[0]} {task_argument}", config=mjlab.TYRO_FLAGS)
-        run_play(task_argument, cfg)
+    """解析当前唯一支持的 SuperMimic 播放协议。"""
+    from src.tasks.locomotion.go2_supermimic.config.train_cfg import TASK_MODES
+
+    if len(sys.argv) == 1 or sys.argv[1] in {"-h", "--help"}:
+        _print_help(sys.stdout)
         return
-
-    from src.tasks import register_tasks
-    from mjlab.tasks.registry import list_tasks
-
-    register_tasks()
-    tasks = list_tasks()
-    if len(sys.argv) == 1 or sys.argv[1] in ("-h", "--help"):
-        from src.tasks.locomotion.go2_supermimic.config.train_cfg import TASK_MODES
-        from src.tasks.locomotion.go1_depth.training import TASK_MODES as DEPTH_TASK_MODES
-
-        print(f"usage: {sys.argv[0]} TASK [OPTIONS]")
-        print(f"Run '{sys.argv[0]} TASK --help' for playback options.")
-        print("Available tasks:")
-        for task in sorted(set(tasks) | set(TASK_MODES) | set(DEPTH_TASK_MODES)):
-            print(f"  {task}")
-        return
-
-    task_id, remaining = tyro.cli(
-        tyro.extras.literal_type_from_choices(tasks),
-        add_help=False,
-        return_unknown_args=True,
-        config=mjlab.TYRO_FLAGS,
-    )
-    cfg = tyro.cli(
-        PlayConfig,
-        args=remaining,
-        default=PlayConfig(),
-        prog=f"{sys.argv[0]} {task_id}",
-        config=mjlab.TYRO_FLAGS,
-    )
+    task_id = sys.argv[1]
+    if task_id not in TASK_MODES:
+        print(f"[ERROR] Unsupported playback task: {task_id}", file=sys.stderr)
+        _print_help(sys.stderr)
+        raise SystemExit(2)
+    cfg = tyro.cli(PlayConfig, args=sys.argv[2:], prog=f"{sys.argv[0]} {task_id}", config=mjlab.TYRO_FLAGS)
     run_play(task_id, cfg)
 
 
