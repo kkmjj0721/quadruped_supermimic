@@ -2,13 +2,15 @@
 
 ## 硬性约束：严禁防御性编程（Fail-Fast）
 
-本项目为内部算法与仿真代码，**快速失败（直接抛出原始异常）优先于防崩溃**。未经明确要求，严格禁止以下保护性代码：
+本项目为强化学习与机器人仿真训练代码，**快速失败（直接抛出原生异常）严格优先于防崩溃**。未经用户明确要求，任何“为了保险”加入的兜底、回退或容错分支均视为引入隐藏 Bug。
 
-1. **禁止隐式兜底**：严禁使用 `dict.get(k, default)`、`getattr(obj, name, default)`、`hasattr()`、`x or default` 来回避缺失的配置项或属性；直接访问 `dict[k]` / `obj.name`，缺失即报错。
-2. **禁止内部重复判空与类型检查**：除 `scripts/` 入口参数解析与外部 I/O 边界外，`src/tasks/`、`agents/` 等核心调用链一律默认上游数据符合契约，禁止新增 `if x is None`、`isinstance` 等防御分支。
-3. **禁止滥用异常捕获**：严禁使用 `try/except` 吞掉异常、返回默认值或打印警告后继续执行；除非有明确的外部资源清理或已指定的错误恢复逻辑。
-4. **禁止擅自保留兼容层**：修改接口或配置结构时，直接替换并同步更新调用方，禁止保留新旧双路径、fallback 分支或重试机制。
-5. **交付前减法自检**：完成修改后，必须逐行检查本次 diff 中新增的所有 `if`、`try`、`.get(`、`getattr(`，凡是“为了保险/防报错”而非当前需求直接要求的分支，一律删除。
+1. **物理边界划死**：仅允许在 CLI 与外部 I/O 边界（`scripts/`、`cli.py`、`config/loading.py`、`rl/checkpoints.py`、`agents/supermimic/export.py`、`tools/`）做一次输入校验。`agents/supermimic/`、`src/tasks/locomotion/go2_supermimic/mdp/`、`src/tasks/locomotion/go2_supermimic/rl/` 及 `src/config/` 内部均为**零防御区**，默认数据符合契约，禁止二次判空或 `isinstance` 检查。
+2. **禁止隐式兜底与属性探测**：内部调用链及 `transition_adapter.py` / `interfaces.py` 之间，严禁使用 `dict.get(k, default)`、`getattr(obj, name, default)`、`hasattr()`、`x or default` 回避缺失的配置键或字段；直接访问 `dict[k]` / `obj.name`，缺失即抛错。
+3. **禁止 CUDA Graph / 编译静默降级**：在 `cuda_graph.py`、`compilation.py` 及训练/推理入口中，严禁使用 `try/except` 在 CUDA Graph 捕获失败、replay 异常或 `torch.compile` 报错时静默回退到 eager 模式。
+4. **禁止数值静默清洗**：在 `mdp/`（运动学、旋转、奖励、动力学）与 `agents/supermimic/`（`learner.py`、`world_model.py`、`imagine.py`、`metrics.py`）中，严禁私自添加 `torch.nan_to_num`、未在论文或配置中约定的 `clamp`、防除零偏置或张量自动裁切/补齐来掩盖 `NaN`、`Inf` 或 shape 错误。
+5. **禁止权重与日志静默吞错**：`checkpoints.py` 加载权重默认必须 `strict=True`，严禁私自改为 `strict=False` 或跳过不匹配键；`logging.py`、`metrics.py`、`timing.py` 严禁 `try/except Exception: pass`。
+6. **禁止保留新旧兼容层**：修改配置结构、接口或状态规格（`state_spec.py`、`interfaces.py`）时直接替换并同步更新调用方，禁止保留旧字段兼容分支、双路径或未授权的重试/回退。
+7. **交付前 Diff 减法自检**：完成代码修改后，必须扫描本次 diff 中新增的所有 `try`、`except`、`.get(`、`getattr(`、`hasattr(`、`nan_to_num`、`strict=False` 以及 `if ... is None`；凡非当前需求直接要求的保护分支，一律删除后再交付。
 
 ## 语言与已有风格
 
@@ -64,7 +66,7 @@
 - `src/assets/`：机器人模型、场景及静态资源。
 - `src/config/`：配置定义与组合，不放业务执行逻辑。
 - `src/tasks/locomotion/`、`src/tasks/tracking/`：各自任务的观测、动作、奖励、终止与重置逻辑。
-- `agents/`：本项目统一的算法目录，SuperMimic 放在 `agents/supermimic/`；引入算法时明确来源、版本和维护方式，不放任务特定规则。
+- `agents/`：本项目统一的算法目录，直接存放 SuperMimic 实现；引入算法时明确来源、版本和维护方式，不放任务特定规则。
 - `scripts/`：训练、评估、播放和导出入口，保持轻量，不承载核心实现。
 - `tools/`：安装、数据检查、转换和调试等辅助工具；可复用工具源码纳入版本管理，一次性实验、分析及调研工具按具体路径在 `.gitignore` 中忽略，不整体屏蔽该目录。
 - `tests/`：按模块组织有实际验证价值的测试。
@@ -151,6 +153,10 @@ Python 脚本格式如下，内容与命令应替换为当前脚本的实际职�
 - 本地训练确认启动正常后，全程使用休眠或阻塞等待，直到训练结束；期间不读取训练日志、指标、检查点或查询设备状态，不持续监控训练。工具需要分段等待时，醒来仅确认进程是否结束，未结束则继续休眠；结束后统一检查退出状态、日志、检查点和测试结果并分析。启动失败、异常退出或达到预设超时时可提前排查，但须如实记录失败或中断，不能将不足最低训练时长的运行标为训练验证完成。
 - 不把未运行的检查或未实现的能力描述为已通过或已完成。
 - 完成后用中文简要说明修改内容、涉及模块和结果，包含实际执行的验证、审查结论及必要的未验证事项；技术结论按上述依据分类说明来源与推断，避免把外部结果写成本项目验证结果。
+
+## 交付前减法自检
+
+每次修改完成后，扫描本次 diff 中新增的所有 `raise ValueError`、`isinstance(`、`math.isfinite(`、`if ... < 1`、`if ... is None`、`try:`，逐条确认是否属于上述三类白名单；凡是“上游已保证”或“为了以防万一”的校验，一律删除后再交付。
 
 ## Git 操作与提交信息
 
