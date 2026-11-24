@@ -16,7 +16,7 @@
 | 事件概率监督 | 本项目SuperMimic适配，官方PPO没有对应预测头 | 物理视图147维＋四元数4维，模型输入346／输出102；新增任意足绊脚及四腿calf接触logit，以真实标签的未加权BCE均值监督，原97维物理回归MSE保留。真实与想象奖励统一读取事件字段；不把概率校准或能力改善视为已验证 |
 | 默认站姿 | 本项目`main@9c3a8ad`的集中`init_state`配置 | 按用户要求恢复base z=.29、四条thigh=.9、calf=-1.8、hip左右±.1；当前MuJoCo资产前向计算四足球底净空均约.01249m。PD及动作尺度不变 |
 | `mdp/reference_kinematics.py` | 当前Go2 MJCF及原有BlinkMimic FK | 足高按各足yaw方向的四个±0.015m点平均地面；射线起点的+20m不进入高度。想象的last时长／首次落地是接触概率连续代理，真实端读取原生传感器 |
-| `mdp/terrains.py`、`mdp/stepping_stones.py` | 原Ri-5036 HIM地形、PROOF `utils/terrains/terrains_cfg.py`及MjLab 1.6.0 `BoxSteppingStonesTerrainCfg` | 保留原十类及正反光滑金字塔坡，末尾追加方形梅花桩：六档边长30→15cm、内侧净间隙10→25cm、精确2.5×2.5m出生平台、环境占比10%；零边框保留0.4m节距，局部适配固定平台尺寸；关闭尺寸与位置扰动，保留难度递增的±2cm高差。课程保持原六级；相对仅含两坡版本，整图居中使原块y平移-4m，局部几何不变 |
+| `mdp/terrains.py` | 原Ri-5036 HIM地形、PROOF `utils/terrains/terrains_cfg.py`及MjLab 1.6.0 `BoxSteppingStonesTerrainCfg` | 保留原十类及正反光滑金字塔坡，末尾追加方形梅花桩：8×8m地块包含7.5×7.5m桩区和四边各0.25m平地，六档桩面边长30→15cm、环境占比10%；直接复用原生网格及平台对齐，节距约0.416667m、实际桩间净间隙约11.67→26.67cm；平台最小边长2.5m、六档实际边长2.80/2.77/2.74/2.71/2.68/2.65m，四边出口缝与本档桩间缝一致；关闭尺寸与位置扰动，保留难度递增的±2cm高差。课程保持原六级；相对仅含两坡版本，整图居中使原块y平移-4m，局部几何不变 |
 | 终止 | PROOF `mdp_cfg/terminations_cfg.py` | 倾角>1.5rad、base历史净力>5N为失败；20s超时与核心边界外4m为truncation。想象倾角软失败保留现有SuperMimic，base接触使用来源硬阈值 |
 
 Go2资产、执行器PD、动作尺度、物理随机化、命令采样、行走表现课程及SuperMimic训练预算沿用本项目。参考实现为IsaacLab3／PhysX，本项目为MjLab1.6／MuJoCo；不将代码对拍或短时训练当作作者性能复现或真机验证。原资产与FK来源说明、`LICENSE_blinkmimic`保持原归属。
