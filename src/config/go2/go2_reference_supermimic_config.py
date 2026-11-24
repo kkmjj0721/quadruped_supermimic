@@ -191,11 +191,11 @@ class Go2ReferenceCfg(BaseConfig):
         enable_self_collision = True
 
     class init_state:
-        pos = [0.0, 0.0, 0.29]
+        pos = [0.0, 0.0, 0.4]
         default_joint = {
             **{f"{leg}_hip_joint": 0.1 if leg in ("FL", "RL") else -0.1 for leg in ("FL", "FR", "RL", "RR")},
-            **{f"{leg}_thigh_joint": 0.9 for leg in ("FL", "FR", "RL", "RR")},
-            **{f"{leg}_calf_joint": -1.8 for leg in ("FL", "FR", "RL", "RR")},
+            **{f"{leg}_thigh_joint": 0.8 if leg in ("FL", "FR") else 1.0 for leg in ("FL", "FR", "RL", "RR")},
+            **{f"{leg}_calf_joint": -1.5 for leg in ("FL", "FR", "RL", "RR")},
         }
 
     class terrain:

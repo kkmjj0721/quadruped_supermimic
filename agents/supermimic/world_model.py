@@ -120,6 +120,11 @@ class WorldModel(nn.Module):
         self.apply_statistics(statistics)
 
     def forward(self, state: TaskState, action: Tensor, recorded_current: TaskState | None = None) -> TaskState:
+        return self.predict(state, action, recorded_current)[0]
+
+    def predict(self, state: TaskState, action: Tensor,
+                recorded_current: TaskState | None = None) -> tuple[TaskState, Tensor]:
+        """共享一次网络前向，监督同时取得推进状态与未施加输出链接的原始预测。"""
         inputs = (self.task.model_input(state, action) if recorded_current is None
                   else self.task.supervised_model_input(state, action, recorded_current))
         normalized = self.input_norm(inputs)
@@ -133,7 +138,7 @@ class WorldModel(nn.Module):
         delta = self.output_norm.unnormalize(network_delta)
         physical = self.task.integrate(state, action, delta)
         # 监督推进仍消费命令采样随机数；完整损失编译不得删除这些副作用。
-        return self.task.advance(state, action, physical)
+        return self.task.advance(state, action, physical), delta
 
     def loss(self, window) -> Tensor:
         return self._loss(window) if self._compiled_supervised is None else self._compiled_supervised(window)
@@ -141,6 +146,12 @@ class WorldModel(nn.Module):
     def loss_scale(self) -> Tensor:
         """默认沿用输出统计；残差模型可独立定义物理状态误差尺度。"""
         return self.output_norm.var.sqrt() + 1e-6
+
+    def supervised_loss(self, current, predicted, target, recorded_current, delta, scale) -> Tensor:
+        """默认监督标准化物理误差；任务子类可定义其分类输出的损失。"""
+        del delta
+        error = self.task.model_error(current, predicted, target, recorded_current) / scale
+        return error.square().mean(-1)
 
     def _loss(self, window) -> Tensor:
         current = window.initial
@@ -150,9 +161,9 @@ class WorldModel(nn.Module):
         for step in range(window.actions.shape[1]):
             target = window.targets.index((slice(None), step))
             action = window.actions[:, step]
-            predicted = self(current, action, recorded_current)
-            error = self.task.model_error(current, predicted, target, recorded_current) / scale
-            total = total + (error.square().mean(-1) * window.valid[:, step]).sum()
+            predicted, delta = self.predict(current, action, recorded_current)
+            loss = self.supervised_loss(current, predicted, target, recorded_current, delta, scale)
+            total = total + (loss * window.valid[:, step]).sum()
             # 本协议的记忆只含记录动作与外生计时，按日志恢复命令重采样；物理状态始终回喂预测。
             current = TaskState(predicted.physical, target.memory, target.command, target.context)
             recorded_current = target

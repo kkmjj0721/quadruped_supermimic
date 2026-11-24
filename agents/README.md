@@ -14,13 +14,17 @@
 | 高程编码 | `[64,32]→32`，隐藏层LayerNorm与ELU，输出tanh后乘回合级二值mask |
 | 动作 | 本体latent32＋归一化当前帧45＋高程latent32，共109维，经`[512,256,128]→12` |
 | critic | 80维干净特权状态＋162点地图＋43维任务记忆，经`[512,256,128]→1` |
-| 世界模型 | 341维输入，97维残差／辅助输出；奖励与失败由任务解析计算 |
+| 世界模型 | 346维输入，102维输出：97维物理残差／辅助量＋5维安全事件logit；奖励与失败由任务计算 |
 
 外部本体历史保持逐帧布局；策略内部按观测项重排，与作者编码器输入一致。地图不加观测噪声、不堆叠历史、不存入压缩回放，按当前或记录状态从静态地形重算。普通粗糙地形每次reset有40%概率关闭高程latent；作者名单没有flat，平地家族保持mask=1。critic与世界模型始终看到干净地图。
 
 本体历史与critic完整输入采用作者累计总体方差归一化，分母为`std+0.01`；actor的高程与mask不归一化。两个编码器保留默认初始化，动作与价值主干各Linear采用gain=0.01的正交初始化。SuperMimic继续使用确定性想象动作、真实采集固定高斯探索与原优化排期。
 
 Critic的43维任务记忆按main表达接触状态、腾空／支撑计时、前前步动作和命令条件，并补充当前奖励使用的上一腾空／支撑时长、首次接触及回合时间。原前一步动作已在80维特权状态中；heading目标转换为相对机身yaw的sin/cos，步态相位不再使用。该输入扩展是本项目针对SuperMimic的适配，当前总宽度285，需使用匹配任务语义的新Critic权重。
+
+真实状态追加任意足绊脚与四条小腿接触的0/1标签；世界模型用未加类别权重的BCEWithLogits监督对应概率。物理量继续按原97维MSE训练。奖励直接读取事件字段：真实端保持官方硬事件计分，想象端使用概率计算期望惩罚，梯度穿过世界模型进入策略。这是本项目SuperMimic适配，不属于官方PPO中的事件预测机制，也不代表真实碰撞已得到改善。
+
+默认站姿对齐官方：机身初始高度0.4米，前腿大腿角0.8、后腿1.0、膝角−1.5弧度，髋角保持左+0.1／右−0.1。当前MuJoCo资产使用新关节角时，原0.29米初始高度会造成足端穿地，因此高度一并对齐；PD、动作尺度与重置偏移沿用本项目。
 
 ## 训练、续训与播放
 
@@ -35,7 +39,7 @@ uv run --no-sync python scripts/play.py Unitree-Go2-SuperMimic-Rough \
 
 训练保留编译、CUDA Graph、BF16、Muon＋Adam、想象／critic微批、frames压缩回放和设备指标汇总。相关CLI参数仍为`--wm-compile`、`--cuda-graph`、`--wm-bf16`、`--actor-bf16`、`--critic-bf16`、`--imag-microbatch`、`--critic-microbatch`、`--replay-history-storage`与`--metric-interval`。CPU执行时显式关闭三个BF16开关。完整参数通过入口`--help`查看。
 
-`--task-config`加载当前教师配置；`--resume`默认热启动，`--continue-run True`接续迭代号。检查点与同目录`task_config.json`共同描述任务。新格式为`supermimic_proof_teacher_v1`，旧MoE检查点不能加载为高程图教师；不提供字段或权重兼容迁移。
+`--task-config`加载当前教师配置；`--resume`默认热启动，`--continue-run True`接续迭代号。检查点与同目录`task_config.json`共同描述任务。当前格式为`supermimic_proof_teacher_v2`，状态151维，旧v1教师与MoE检查点均不兼容；不提供字段或权重兼容迁移。本轮事件与站姿版本需重新训练。
 
 任务名称沿用`Unitree-Go2-SuperMimic-Flat/Rough`。当前Go2资产、关节顺序、PD、动作尺度、物理随机化、命令采样和地形课程沿用本项目；因此不声称与作者IsaacLab／PhysX轨迹等价。
 

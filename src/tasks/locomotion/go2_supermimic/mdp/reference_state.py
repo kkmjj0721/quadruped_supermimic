@@ -25,12 +25,16 @@ CALF_CONTACT_FORCE = slice(121, 125)
 BASE_CONTACT_FORCE = slice(125, 126)
 COMPUTED_TORQUE = slice(126, 138)
 FOOT_HISTORY_CONTACT = slice(138, 142)
-AUXILIARY = slice(73, 142)
-PHYSICAL_DIM = 142
+STUMBLE_EVENT = slice(142, 143)  # 真实端为任意足绊脚标签，想象端为事件概率。
+CALF_CONTACT_EVENT = slice(143, 147)  # 四条小腿的非期望接触标签或概率。
+CONTACT_EVENTS = slice(142, 147)
+AUXILIARY = slice(73, 147)
+PHYSICAL_DIM = 147
 # 残差网络布局：位置／旋转修正、速度增量、关节修正／速度增量，共36维；随后是独立辅助量。
 GENERALIZED_DELTA_DIM = 36
 MODEL_CONTACT = slice(48, 52)
 MODEL_HISTORY_CONTACT = slice(93, 97)
+MODEL_EVENTS = slice(97, 102)
 CONTEXT_COM = slice(13, 16)
 
 

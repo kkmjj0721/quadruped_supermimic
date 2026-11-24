@@ -4,8 +4,8 @@
 import torch
 
 from .reference_state import (
-    ANGULAR_BODY, CALF_CONTACT_FORCE, COMPUTED_TORQUE, CONTACT_FOUND, FOOT_CONTACT_FORCE, FOOT_HISTORY_CONTACT,
-    FOOT_VELOCITY_XY, JOINT_ACCELERATION, JOINT_OFFSET, JOINT_TORQUE, JOINT_VELOCITY,
+    ANGULAR_BODY, CALF_CONTACT_EVENT, COMPUTED_TORQUE, CONTACT_FOUND, FOOT_HISTORY_CONTACT,
+    FOOT_VELOCITY_XY, JOINT_ACCELERATION, JOINT_OFFSET, JOINT_TORQUE, JOINT_VELOCITY, STUMBLE_EVENT,
 )
 from .state_spec import (
     ELAPSED_TIME, FIRST_CONTACT, LAST_AIR_TIME, LAST_CONTACT_TIME, PREVIOUS_ACTION, PREVIOUS_PREVIOUS_ACTION,
@@ -25,7 +25,6 @@ def reference_reward_terms(task, state, action, next_state, failure):
               | (state.command[:, 2].abs() > cfg.command_threshold))
     command_magnitude = state.command[:, :2].norm(dim=-1) + state.command[:, 2].abs()
     standing = command_magnitude <= cfg.stand_still_command_threshold
-    foot_force = physical[:, FOOT_CONTACT_FORCE].reshape(-1, 4, 3)
     foot_velocity = physical[:, FOOT_VELOCITY_XY].reshape(-1, 4, 2)
     foot_speed = foot_velocity.norm(dim=-1)
     foot_speed_squared = foot_velocity.square().sum(-1)
@@ -61,14 +60,13 @@ def reference_reward_terms(task, state, action, next_state, failure):
         "action_rate_l2": (action - state.memory[:, PREVIOUS_ACTION]).square().sum(-1),
         "action_smoothness_l2": (action - 2 * state.memory[:, PREVIOUS_ACTION]
                                  + state.memory[:, PREVIOUS_PREVIOUS_ACTION]).square().sum(-1) * smoothness_active,
-        "undesired_contacts": (physical[:, CALF_CONTACT_FORCE] > cfg.contact_force_threshold).sum(-1),
+        "undesired_contacts": physical[:, CALF_CONTACT_EVENT].sum(-1),
         "feet_air_time": ((last_air_time - cfg.feet_air_time_threshold)
                           * next_state.memory[:, FIRST_CONTACT]).sum(-1) * moving,
         # ae910b8的where在parkour分支返回零，普通地形实际保留此项；方差沿用默认无偏估计。
         "feet_air_time_variance": (last_air_time.clamp(max=cfg.contact_time_variance_clip).var(dim=-1)
                                    + last_contact_time.clamp(max=cfg.contact_time_variance_clip).var(dim=-1)),
-        "feet_stumble": (foot_force[..., :2].norm(dim=-1)
-                         > cfg.stumble_ratio * foot_force[..., 2].abs()).any(-1).float(),
+        "feet_stumble": physical[:, STUMBLE_EVENT].squeeze(-1),
         "feet_slide": (foot_speed * physical[:, FOOT_HISTORY_CONTACT]).sum(-1),
         "is_alive": 1 - failure,
         "termination_penalty": failure,

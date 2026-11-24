@@ -20,7 +20,7 @@ from .structured_dynamics import ResidualDynamics
 from .reference_state import (
     ANGULAR_BODY, AUXILIARY, BASE_CONTACT_FORCE, CONTACT_FOUND, CONTEXT_COM, FEET,
     FOOT_CONTACT_FORCE, GENERALIZED_DELTA_DIM, GRAVITY, HEIGHT, JOINT_ACCELERATION, JOINT_OFFSET,
-    JOINT_TORQUE, JOINT_VELOCITY, MODEL_CONTACT, MODEL_HISTORY_CONTACT, PHYSICAL_DIM, POSE,
+    JOINT_TORQUE, JOINT_VELOCITY, MODEL_CONTACT, MODEL_EVENTS, MODEL_HISTORY_CONTACT, PHYSICAL_DIM, POSE,
     ROBOT_STATE, VELOCITY_HEADING, body_planar_velocity, body_vertical_velocity, yaw_rotate_inverse,
 )
 from .state_spec import (
@@ -67,7 +67,7 @@ class Go2ReferenceTaskModel:
         payload = {"task": self._semantic_config(), "geometry": surface.geometry_hash,
                    "default_joint_pos": self.default_joint_pos.cpu().tolist(),
                    "joint_limits": self.joint_limits.cpu().tolist(),
-                   "layout": "proof_teacher_physical142_quat4_memory54_context27_critic285_v2",
+                   "layout": "proof_teacher_physical147_quat4_memory54_context27_critic285_contact_events_v3",
                    "contact_force_frame": "world_force_on_robot",
                    "dynamics": "blinkmimic_residual_fk_quaternion_v1"}
         self.semantic_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -76,8 +76,8 @@ class Go2ReferenceTaskModel:
             observation_dim=45, privileged_dim=cfg.env.num_critic_obs, context_dim=CONTEXT_DIM,
             memory_dim=MEMORY_DIM, command_dim=3, heightmap_dim=self.heightmap_dim,
             history_length=cfg.env.num_obs_history,
-            semantic_id="go2_proof_teacher_ae910b8_reward_memory_residual_fk_v2:" + self.semantic_hash,
-            model_id="supermimic_proof_teacher_v1")
+            semantic_id="go2_proof_teacher_ae910b8_contact_events_residual_fk_v3:" + self.semantic_hash,
+            model_id="supermimic_proof_teacher_v2")
 
     def _semantic_config(self) -> dict:
         """运行预算不改变任务语义；模型与观测结构由快照完整描述。"""
@@ -129,12 +129,17 @@ class Go2ReferenceTaskModel:
                            + self.actuator_bias[:, 2] * sim.actuator_velocity[:, self.actuator_ids])
         history_contact = (sensor.force_history.norm(dim=-1).amax(dim=2) > self.cfg.reward.contact_force_threshold).float()
         # 当前primary足端／secondary地面配置返回对地反作用力，取反后才是PROOF的机器人受力。
+        foot_force = -sensor.force
+        # 标签只在真实传感器边界按官方定义生成，想象不对回归接触力重复做阈值判定。
+        stumble = (foot_force[..., :2].norm(dim=-1)
+                   > self.cfg.reward.stumble_ratio * foot_force[..., 2].abs()).any(-1, keepdim=True).float()
+        calf_contact = (calf_force > self.cfg.reward.contact_force_threshold).float()
         return torch.cat((height, data.projected_gravity_b, yaw_rotate_inverse(data.root_link_lin_vel_w, yaw),
                           data.root_link_ang_vel_b, data.joint_pos - data.default_joint_pos, data.joint_vel, *relative,
                           position[:, :2], yaw[:, None], data.joint_acc,
                           data.site_lin_vel_w[:, self.foot_ids, :2].flatten(1), (sensor.found > 0).float(),
-                          -sensor.force.flatten(1), data.actuator_force, calf_force, base_force, computed_torque,
-                          history_contact, data.root_link_quat_w), -1)
+                          foot_force.flatten(1), data.actuator_force, calf_force, base_force, computed_torque,
+                          history_contact, stumble, calf_contact, data.root_link_quat_w), -1)
 
     def world_position(self, state: TaskState) -> Tensor:
         xy = state.physical[:, POSE][:, :2]
@@ -316,7 +321,7 @@ class Go2ReferenceTaskModel:
         generalized = self.dynamics.integrate(self.generalized_state(state), delta[:, :GENERALIZED_DELTA_DIM])
         auxiliary = torch.cat((delta[:, GENERALIZED_DELTA_DIM:MODEL_CONTACT.start],
                                delta[:, MODEL_CONTACT].sigmoid(), delta[:, MODEL_CONTACT.stop:MODEL_HISTORY_CONTACT.start],
-                               delta[:, MODEL_HISTORY_CONTACT].sigmoid()), -1)
+                               delta[:, MODEL_HISTORY_CONTACT].sigmoid(), delta[:, MODEL_EVENTS].sigmoid()), -1)
         return self.physical_state(generalized, auxiliary)
 
     def model_error(self, current: TaskState, predicted: TaskState, target: TaskState,
