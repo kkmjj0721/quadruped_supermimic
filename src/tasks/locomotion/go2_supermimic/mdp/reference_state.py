@@ -19,18 +19,18 @@ POSE = slice(70, 73)
 JOINT_ACCELERATION = slice(73, 85)
 FOOT_VELOCITY_XY = slice(85, 93)
 CONTACT_FOUND = slice(93, 97)
-FOOT_CONTACT_FORCE = slice(97, 109)
+FOOT_CONTACT_FORCE = slice(97, 109)  # 世界系作用于机器人足端的接触力。
 JOINT_TORQUE = slice(109, 121)
-LEG_CONTACT_FORCE = slice(121, 122)
-ANGULAR_MOMENTUM = slice(122, 125)  # heading系角动量；平方和与来源world系严格等价。
-AUXILIARY = slice(73, 125)
-PHYSICAL_DIM = 125
+CALF_CONTACT_FORCE = slice(121, 125)
+BASE_CONTACT_FORCE = slice(125, 126)
+COMPUTED_TORQUE = slice(126, 138)
+FOOT_HISTORY_CONTACT = slice(138, 142)
+AUXILIARY = slice(73, 142)
+PHYSICAL_DIM = 142
 # 残差网络布局：位置／旋转修正、速度增量、关节修正／速度增量，共36维；随后是独立辅助量。
 GENERALIZED_DELTA_DIM = 36
 MODEL_CONTACT = slice(48, 52)
-LEG_PHYSICAL_DIM = 122
-FORCE_PHYSICAL_DIM = 121
-LEGACY_PHYSICAL_DIM = 97
+MODEL_HISTORY_CONTACT = slice(93, 97)
 CONTEXT_COM = slice(13, 16)
 
 
@@ -61,12 +61,6 @@ def normalized_gravity(physical: Tensor) -> Tensor:
     """仅供姿态坐标计算；不投影或改写世界模型的直接状态预测。"""
     gravity = physical[..., GRAVITY]
     return gravity / gravity.norm(dim=-1, keepdim=True).clamp_min(1e-6)
-
-
-def tracking_velocity(physical: Tensor) -> Tensor:
-    """论文A.6命令坐标：heading平面速度和世界角速度z。"""
-    world_yaw_rate = -(normalized_gravity(physical) * physical[..., ANGULAR_BODY]).sum(-1, keepdim=True)
-    return torch.cat((physical[..., VELOCITY_HEADING][..., :2], world_yaw_rate), -1)
 
 
 def body_planar_velocity(physical: Tensor) -> Tensor:

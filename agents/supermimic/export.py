@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：导出含混合专家编码器、双路归一化及动作网络的独立策略。"""
+"""内容：导出含本体／高程双编码器、回合mask及动作网络的三输入教师策略。"""
 
 from copy import deepcopy
 import json
@@ -29,28 +29,42 @@ def _prepare_policy(actor, iteration, metadata):
         if isinstance(layer, Mlp):
             layer.use_bf16 = False
     for normalizer in module.policy_normalizers():
-        if (normalizer.var < 0).any() or normalizer.count <= 0:
+        if (normalizer.var < 0).any() or normalizer.count < 0:
             raise ValueError("Invalid policy normalization statistics")
-    encoder = {"type": "moe", "experts": module.encoder.moe.experts.expert_num,
-               "latent_dim": module.latent_dim, "velocity_dim": module.velocity_dim,
-               "output_dim": module.latent_dim + module.velocity_dim,
-               "gate_input": "normalized_history", "latent_normalization": "l2_after_mixture",
-               "velocity": {"frame": "body", "components": ["vx", "vy", "vz"], "units": "m/s",
-                            "time": "current", "normalization": "none"}}
+    encoder = {
+        "type": "dual_mlp",
+        "proprioception": {
+            "input": "normalized_history", "hidden_dims": list(module.prop_encoder_hidden),
+            "latent_dim": module.prop_latent_dim, "layer_norm": "pre_activation", "activation": "elu",
+            "velocity": {"columns": [0, 1, 2], "frame": "body", "components": ["vx", "vy", "vz"],
+                         "units": "m/s", "time": "current", "normalization": "none"},
+        },
+        "heightmap": {
+            "input": "heightmap", "input_dim": module.heightmap_dim,
+            "hidden_dims": list(module.height_encoder_hidden), "latent_dim": module.height_latent_dim,
+            "layer_norm": "pre_activation", "activation": "elu", "output_activation": "tanh",
+            "mask_input": "exteroceptive_mask", "mask_stage": "after_tanh",
+        },
+    }
     information = {
-        **(metadata or {}), "format": "supermimic_moe_velocity_policy_v1",
+        **(metadata or {}), "format": "supermimic_proof_teacher_policy_v1",
         "iteration": iteration,
-        "input_name": "obs_history", "output_name": "actions", "dtype": "float32",
+        "input_names": ["obs_history", "heightmap", "exteroceptive_mask"],
+        "output_name": "actions", "dtype": "float32",
         "source_network_precision": source_precision, "export_network_precision": "fp32",
-        "input_shape": [None, module.history_length * module.observation_dim],
+        "input_shapes": {"obs_history": [None, module.history_length * module.observation_dim],
+                         "heightmap": [None, module.heightmap_dim], "exteroceptive_mask": [None, 1]},
         "output_shape": [None, module.action_dim], "observation_dim": module.observation_dim,
+        "heightmap_dim": module.heightmap_dim,
         "history_length": module.history_length, "history_order": module.history_order,
+        "encoder_history_order": module.encoder_history_order,
         "history_reset": "repeat_initial_frame",
-        "normalization": {"statistics_in_graph": True, "split": "history_and_current_frame",
-                          "formula": "clamp((x-mean)/(sqrt(var)+1e-6),-10,10)"},
+        "normalization": {"statistics_in_graph": True, "proprioception": "empirical_population_std",
+                          "formula": "(x-mean)/(sqrt(var)+1e-2)", "initial_count": 0,
+                          "current_frame": "select_normalized_term_history", "heightmap": "none", "mask": "none"},
         "action_semantics": "unscaled_joint_position_offsets", "action_transform": "identity",
         "actor_input_order": module.input_order,
-        "actor_input_dim": module.latent_dim + module.velocity_dim + module.observation_dim,
+        "actor_input_dim": module.actor_input_dim,
         "encoder": encoder,
     }
     return module, information
@@ -60,10 +74,14 @@ def _write_onnx(module, path, information):
     """把完整策略与元数据写入尚未发布的ONNX文件。"""
     import onnx
 
-    torch.onnx.export(module, (torch.zeros(1, module.history_length * module.observation_dim),),
+    inputs = (torch.zeros(1, module.history_length * module.observation_dim),
+              torch.zeros(1, module.heightmap_dim), torch.ones(1, 1))
+    torch.onnx.export(module, inputs,
                       str(path), export_params=True, opset_version=18, dynamo=False,
-                      input_names=["obs_history"], output_names=["actions"], external_data=False,
-                      dynamic_axes={"obs_history": {0: "batch"}, "actions": {0: "batch"}})
+                      input_names=["obs_history", "heightmap", "exteroceptive_mask"],
+                      output_names=["actions"], external_data=False,
+                      dynamic_axes={"obs_history": {0: "batch"}, "heightmap": {0: "batch"},
+                                    "exteroceptive_mask": {0: "batch"}, "actions": {0: "batch"}})
     model = onnx.load(path)
     for name, value in information.items():
         field = model.metadata_props.add()

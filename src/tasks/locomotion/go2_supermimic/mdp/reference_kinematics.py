@@ -64,6 +64,19 @@ class Go2Kinematics(nn.Module):
         self.register_buffer("rotations", quat_to_mat(torch.tensor(np.array(rotations), dtype=torch.float32, device=device)))
         self.register_buffer("site_offsets", torch.tensor(model.site_pos[sites].copy(), dtype=torch.float32, device=device))
 
+    def foot_yaw(self, rotation, joints):
+        """按同一关节树恢复各足所属刚体的yaw，供PROOF四射线足高使用。"""
+        rotations = [None] * self.num_bodies
+        for index in range(self.num_bodies):
+            parent = self.parents[index]
+            if parent < 0:
+                rotations[index] = rotation
+            else:
+                offset = mm3(rotations[parent], self.rotations[index])
+                rotations[index] = mm3(offset, axis_angle_to_mat(self.axes[index], joints[..., self.joints[index]]))
+        feet = torch.stack([rotations[parent] for parent in self.site_parents], -3)
+        return torch.atan2(feet[..., 1, 0], feet[..., 0, 0])
+
     def forward(self, p, R, v, w, q, qd):
         """返回世界系髋4／膝4／足4位置和足4线速度，保留任意前置批次维度。
 

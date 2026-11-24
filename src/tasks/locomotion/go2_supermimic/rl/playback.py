@@ -1,7 +1,7 @@
 # Copyright (c) 2026-2027 zh
 """
 内容：
-    装配Go2盲策略播放，维护本体历史、课程快照和查看器的完整／部分重置。
+    装配Go2高程教师播放，维护本体历史、课程快照和查看器的完整／部分重置。
 """
 
 from __future__ import annotations
@@ -29,6 +29,27 @@ class _PlaybackTransitionAdapter(Go2TransitionAdapter):
             self.terrain_curriculum.family_ids[ids] = torch.randint(self.map.cols, (ids.numel(),), device=self.device)
             self.terrain_curriculum.levels[ids] = torch.randint(self.map.rows, (ids.numel(),), device=self.device)
         super()._set_origins(ids)
+
+
+class _PlaybackHeightmapVisualizer:
+    """把教师实际使用的高程采样网格显示为地面上的青色点。"""
+
+    def __init__(self, adapter):
+        self.adapter = adapter
+
+    @torch.no_grad()
+    def debug_vis(self, visualizer):
+        task = self.adapter.task
+        state = self.adapter.get_state()
+        positions, yaws = task.world_position(state), task.yaw(state)
+        x, y = task.scan_points.unbind(-1)
+        for env_idx in visualizer.get_env_indices(self.adapter.num_envs):
+            yaw = yaws[env_idx]
+            xy = torch.stack((yaw.cos() * x - yaw.sin() * y,
+                              yaw.sin() * x + yaw.cos() * y), -1) + positions[env_idx, :2]
+            points = torch.cat((xy, task.surface_height(xy)[:, None]), -1).cpu().numpy()
+            for point in points:
+                visualizer.add_sphere(point, radius=0.5 * visualizer.meansize, color=(0., 1., 1., 1.))
 
 
 class _PlaybackRewardManager:
@@ -109,7 +130,7 @@ class _PlaybackCommandManager(NullCommandManager):
 
 
 class SuperMimicVideoRecorder(VideoRecorder):
-    """显式转发盲策略观测，避免继承的原生manager读取绕过历史适配。"""
+    """显式转发教师策略观测，避免继承的原生manager读取绕过历史适配。"""
 
     def get_observations(self):
         return self._wrapped_env.get_observations()
@@ -122,6 +143,7 @@ class SuperMimicPlayEnv:
         self.adapter = adapter
         self.command_manager = _PlaybackCommandManager(adapter)
         self.reward_manager = _PlaybackRewardManager(adapter)
+        adapter.raw_env.manager_visualizers["heightmap"] = _PlaybackHeightmapVisualizer(adapter)
         self._observation = None
         self._history = None
 
@@ -160,7 +182,10 @@ class SuperMimicPlayEnv:
         if self._history is None:
             raise RuntimeError("Reset the SuperMimic playback environment before observing")
         self._update_commands()
-        return {"observation": self._observation, "history": self._history}
+        state = self.adapter.get_state()
+        return {"observation": self._observation, "history": self._history,
+                "heightmap": self.adapter.task.actor_heightmap(state),
+                "exteroceptive_mask": self.adapter.task.actor_mask(state)}
 
     @torch.no_grad()
     def step(self, actions):
@@ -204,7 +229,7 @@ def _restore_curriculum(adapter, checkpoint):
 
 def make_playback(task_id, *, checkpoint_file=None, agent="trained", num_envs=None, device="cpu",
                   render_mode=None, video_height=None, video_width=None, no_terminations=False):
-    """返回已重置的播放环境与确定性盲策略策略，不创建训练组件。"""
+    """返回已重置的播放环境与确定性高程教师策略，不创建训练组件。"""
     if task_id not in TASK_MODES:
         raise ValueError(f"Unknown Go2 SuperMimic task: {task_id}")
     if agent not in ("trained", "zero", "random"):
@@ -228,7 +253,7 @@ def make_playback(task_id, *, checkpoint_file=None, agent="trained", num_envs=No
         @torch.no_grad()
         def policy(observations):
             if model is not None:
-                return model(observations["history"])
+                return model(observations["history"], observations["heightmap"], observations["exteroceptive_mask"])
             shape = (adapter.num_envs, adapter.task.spec.action_dim)
             if agent == "zero":
                 return torch.zeros(shape, device=adapter.device)

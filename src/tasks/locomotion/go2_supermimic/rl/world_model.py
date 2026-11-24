@@ -5,7 +5,7 @@ import torch
 
 from agents.supermimic.world_model import RunningNorm, WorldModel
 
-from ..mdp.reference_state import GENERALIZED_DELTA_DIM, MODEL_CONTACT
+from ..mdp.reference_state import GENERALIZED_DELTA_DIM, MODEL_CONTACT, MODEL_HISTORY_CONTACT
 
 
 class Go2WorldModel(WorldModel):
@@ -32,9 +32,10 @@ class Go2WorldModel(WorldModel):
         self.increment_norm.apply_update(statistics[2])
         active = statistics[1].count > 0
         for norm in (self.output_norm, self.increment_norm):
-            mean, variance = norm.mean[MODEL_CONTACT], norm.var[MODEL_CONTACT]
-            mean.copy_(torch.where(active, 0, mean))
-            variance.copy_(torch.where(active, 1, variance))
+            for region in (MODEL_CONTACT, MODEL_HISTORY_CONTACT):
+                mean, variance = norm.mean[region], norm.var[region]
+                mean.copy_(torch.where(active, 0, mean))
+                variance.copy_(torch.where(active, 1, variance))
 
     def loss_scale(self):
         # 核心物理误差使用参考下限；任务辅助量继续采用原有标准差尺度。

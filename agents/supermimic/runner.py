@@ -42,7 +42,7 @@ def _validate_network_state(state, label="network"):
         raise ValueError(f"Checkpoint contains invalid or non-finite {label} tensors")
     if any((value < 0).any() for key, value in state.items() if key.endswith(".var")):
         raise ValueError(f"Checkpoint contains invalid {label} normalization variance")
-    if any((value <= 0).any() for key, value in state.items() if key.endswith(".count")):
+    if any((value < 0).any() for key, value in state.items() if key.endswith(".count")):
         raise ValueError(f"Checkpoint contains invalid {label} normalization count")
 
 
@@ -198,7 +198,9 @@ class SuperMimicRunner:
         statistics_finite = torch.ones((), dtype=torch.bool, device=self.device)
         for _ in range(steps):
             observation = self.history[:, -1]
-            action = self._override_actions(self.actor(self.history), self.history, observation)
+            heightmap = self.task.actor_heightmap(self.current)
+            mask = self.task.actor_mask(self.current)
+            action = self._override_actions(self.actor(self.history, heightmap, mask), self.history, observation)
             noise = cfg.action_noise * torch.randn_like(action)
             noise.masked_fill_(self.deterministic_collection_mask[:, None], 0)
             action = action + noise

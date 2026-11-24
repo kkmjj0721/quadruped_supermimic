@@ -5,6 +5,9 @@
 """
 
 from copy import deepcopy
+from dataclasses import fields
+
+from agents.supermimic.config import SuperMimicConfig
 import json
 import math
 from pathlib import Path
@@ -77,18 +80,63 @@ def read_settings(path: Path) -> tuple[dict, bool]:
     return settings, "config" in payload
 
 
-def configuration_for_settings(settings: dict | None = None):
-    """只接受混合专家历史策略，未声明算法时使用同一默认值。"""
+def configuration_for_settings(settings: dict):
+    """配置I/O边界只接受当前PROOF教师，不迁移旧MoE快照。"""
     from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
-    settings = settings or {}
-    algorithm = settings.get("algorithm", "moe_history")
-    if algorithm != "moe_history":
-        raise ValueError(f"Unsupported SuperMimic algorithm: {algorithm}")
-    cfg = Go2ReferenceCfg()
-    sections = set(cfg.to_dict()) - {"init_member_classes", "to_dict"}
-    if sections.issubset(settings):
-        # 旧完整快照使用Adam；局部覆盖不改变Go2新训练的优化器默认。
-        for name in ("actor_optimizer", "wm_optimizer"):
-            setattr(cfg.algo, name, settings["algo"].get(name, "adam"))
-    return cfg
+    if "algorithm" in settings and settings["algorithm"] != "proof_teacher":
+        raise ValueError(f"Unsupported SuperMimic algorithm: {settings['algorithm']}")
+    return Go2ReferenceCfg()
+
+
+def validate_config(cfg) -> None:
+    """在配置加载边界统一检查教师的观测布局与外部数值参数。"""
+    if cfg.algorithm != "proof_teacher":
+        raise ValueError("SuperMimic requires the proof_teacher algorithm")
+    if (cfg.env.num_obs_history, cfg.env.num_observations, cfg.env.num_obs,
+            cfg.env.num_critic_obs, cfg.env.num_privileged_obs, cfg.env.heightmap_dim) != (10, 45, 450, 285, 285, 162):
+        raise ValueError("PROOF teacher dimensions must be history10, proprioception45, critic285 and heightmap162")
+    if not cfg.commands.heading_command or cfg.commands.rel_heading_envs != 1.0 or cfg.commands.stages:
+        raise ValueError("The Go2 teacher requires heading commands and the existing fixed velocity ranges")
+    if isinstance(cfg.env.num_envs, bool) or not isinstance(cfg.env.num_envs, int) or cfg.env.num_envs < 1:
+        raise ValueError("Environment count must be a positive integer")
+    if isinstance(cfg.control.decimation, bool) or not isinstance(cfg.control.decimation, int) or cfg.control.decimation < 1:
+        raise ValueError("Control decimation must be a positive integer")
+    for name, value in (("episode_length_s", cfg.env.episode_length_s), ("timestep", cfg.sim.timestep),
+                        ("scan_resolution_m", cfg.terrain.scan_resolution_m),
+                        ("tracking_linear_variance", cfg.reward.tracking_linear_variance),
+                        ("tracking_angular_variance", cfg.reward.tracking_angular_variance),
+                        ("fall_softness_deg", cfg.reward.fall_softness_deg)):
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"Task parameter must be positive and finite: {name}")
+    if not 0 < cfg.reward.fall_angle < math.pi:
+        raise ValueError("Fall angle must be between zero and pi")
+    if cfg.terrain.mode not in ("flat", "rough"):
+        raise ValueError("Unsupported SuperMimic terrain mode")
+    if tuple(cfg.terrain.scan_size_m) != (1.7, 0.8) or cfg.terrain.scan_resolution_m != 0.1:
+        raise ValueError("PROOF teacher heightmap requires a 1.7x0.8m grid with 0.1m spacing")
+    if not 0 <= cfg.teacher.exteroceptive_dropout <= 1:
+        raise ValueError("Exteroceptive dropout must be a probability")
+    for value in cfg.to_dict()["reward"]["scales"].values():
+        if not math.isfinite(value):
+            raise ValueError("Reward weights must be finite")
+    command_ranges = (*cfg.commands.initial_ranges, cfg.commands.heading_range, cfg.commands.resampling_time)
+    if len(cfg.commands.initial_ranges) != 3 or any(
+        len(bounds) != 2 or not all(math.isfinite(value) for value in bounds) or bounds[0] > bounds[1]
+        for bounds in command_ranges
+    ):
+        raise ValueError("Command ranges must be finite and ordered pairs")
+    for value in (cfg.commands.rel_standing_envs, cfg.commands.rel_forward_envs):
+        if not 0 <= value <= 1:
+            raise ValueError("Command mode probabilities must be in [0,1]")
+    if not 0 < cfg.commands.resampling_time[0] <= cfg.commands.resampling_time[1]:
+        raise ValueError("Command resampling times must be positive and ordered")
+
+
+def algorithm_config(cfg):
+    """在JSON覆盖后重新执行dataclass验证，把任务侧驱动配置并入算法预算。"""
+    driver = cfg.runner.driver
+    values = {field.name: getattr(cfg.algo, field.name) for field in fields(SuperMimicConfig)}
+    values.update(driver_frac=driver.frac, expert_frac=driver.expert_frac,
+                  driver_fade=tuple(driver.fade_iterations))
+    return SuperMimicConfig(**values)

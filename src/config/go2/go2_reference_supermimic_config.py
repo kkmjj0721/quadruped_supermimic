@@ -1,17 +1,16 @@
 # Copyright (c) 2026-2027 zh
-"""内容：声明指定Go2参考模型、混合专家策略、HIM命令及二十一项速度奖励。"""
+"""内容：声明Go2的PROOF官方教师结构、普通地形奖励及SuperMimic训练配方。"""
 
 from dataclasses import dataclass
-import math
 
 from agents.supermimic.config import SuperMimicConfig
 from src.config.base.base_config import BaseConfig
 
 
 class Go2ReferenceCfg(BaseConfig):
-    """新训练默认；原论文没有本配置所需的 Go2 动作库先验。"""
+    """PROOF普通地形教师与当前Go2仿真设置。"""
 
-    algorithm = "moe_history"
+    algorithm = "proof_teacher"
 
     @dataclass
     class algo(SuperMimicConfig):
@@ -38,9 +37,10 @@ class Go2ReferenceCfg(BaseConfig):
         # ---------- 策略与价值网络 ----------
         actor_hidden: tuple[int, ...] = (512, 256, 128)
         critic_hidden: tuple[int, ...] = (512, 256, 128)
-        moe_expert_num: int = 8
-        moe_hidden: tuple[int, ...] = (512, 256, 128)
-        moe_latent_dim: int = 32  # 另附3维当前机身线速度，不参与潜特征L2归一化。
+        prop_encoder_hidden: tuple[int, ...] = (128, 64)
+        height_encoder_hidden: tuple[int, ...] = (64, 32)
+        prop_latent_dim: int = 32  # 前三维直接监督当前机身线速度。
+        height_latent_dim: int = 32
         velocity_loss_coef: float = 1.0  # 真实同一时刻机身线速度的MSE监督权重。
 
         # ---------- 优化与排期 ----------
@@ -78,18 +78,18 @@ class Go2ReferenceCfg(BaseConfig):
         scene_extent = 2.0
         seed = 0
         episode_length_s = 20.0
-        num_obs_history = 5
+        num_obs_history = 10
         history_size = num_obs_history
-        num_observations = 47
+        num_observations = 45
         num_obs = num_observations * num_obs_history
-        num_privileged_obs = 262
-        num_critic_obs = 262
+        num_privileged_obs = 285  # 官方特权80＋高程162＋main式奖励／命令记忆43。
+        num_critic_obs = 285
+        heightmap_dim = 162
 
-    class experiment:
-        """声明步态相位观测与想象端接触来源。"""
+    class teacher:
+        """官方普通地形回合级高程latent遮蔽；平地家族保持未遮蔽。"""
 
-        contact_source = "model"  # 想象端默认使用受监督接触概率；height可显式选择足高近似对照。
-        actor_phase = True  # 原45维末尾追加sin／cos，相位与步态奖励共用时钟。
+        exteroceptive_dropout = 0.4
 
     class sim:
         """平地和粗糙地形共用的仿真预算；物理步长以秒计。"""
@@ -121,7 +121,7 @@ class Go2ReferenceCfg(BaseConfig):
         azimuth = 90.0
 
     class noise:
-        """只扰动新生成的盲本体帧，历史帧不重复加噪。"""
+        """只扰动新生成的本体帧，历史帧不重复加噪。"""
 
         add_noise = True
         noise_level = 1.0
@@ -150,7 +150,7 @@ class Go2ReferenceCfg(BaseConfig):
         timing_interval = 1  # 正整数；图准备及首次阶段强制采样，其余按此轮数间隔记录。
         replay_history_storage = "frames"  # 默认压缩带噪历史；full保留完整存储作显式对照。
         wm_bf16 = True  # 世界模型MLP默认使用CUDA BF16，监督与想象一致。
-        actor_bf16 = True  # 策略MLP默认使用CUDA BF16，MoE卷积仍为FP32。
+        actor_bf16 = True  # 策略编码器与动作MLP默认使用CUDA BF16，观测归一化保留FP32。
         critic_bf16 = True  # 价值MLP默认使用CUDA BF16，输出与返回递推仍为FP32。
         enable_control_updates = True
         standing_zero_noise = True  # 站立命令采集关闭额外动作噪声，保留固定无噪声组。
@@ -199,13 +199,13 @@ class Go2ReferenceCfg(BaseConfig):
         }
 
     class terrain:
-        """Ri-5036 HIM地形；难度采用Go2 HIM行走表现课程。"""
+        """Ri-5036 HIM地形追加正反金字塔斜坡；难度采用原有行走表现课程。"""
 
         mode = "flat"
         seed = None
         patch_size_m = (8.0, 8.0)
         core_rows = 6
-        num_cols = 20  # 沿用参考配置；MjLab课程模式按十种子地形实际生成十列。
+        num_cols = 20  # 沿用参考配置；MjLab课程模式按十二种子地形实际生成十二列。
         outer_flat_width_m = 20.0
         max_init_level = 0
         curriculum = True
@@ -213,8 +213,10 @@ class Go2ReferenceCfg(BaseConfig):
         field_resolution_m = 0.02
         field_half_m = 6.5
         field_cache_dir = "logs/heightfields"
-        scan_size_m = (1.2, 0.72)
-        scan_resolution_m = 0.12
+        scan_size_m = (1.7, 0.8)
+        scan_resolution_m = 0.1
+        scan_forward_offset_m = 0.6
+        scan_height_offset_m = 0.25
 
     class domain_randomization:
         """按指定Go2参考的MjLab基类随机化，不加入外力push。"""
@@ -227,7 +229,7 @@ class Go2ReferenceCfg(BaseConfig):
         com_range = {"x": (-0.025, 0.025), "y": (-0.025, 0.025), "z": (-0.03, 0.03)}
 
     class commands:
-        """HIM采样及heading反馈；新奖励评价body平移与world yaw。"""
+        """保留当前HIM采样与heading反馈，教师奖励评价body平移和body yaw。"""
 
         reference_steps_per_iteration = 1
         initial_ranges = ((-1.0, 1.0), (-1.0, 1.0), (-2.0, 2.0))
@@ -244,59 +246,47 @@ class Go2ReferenceCfg(BaseConfig):
         rel_forward_envs = 0.05
 
     class reward:
-        """机体系平移及指定HIM奖励；各项先返回奖励率。"""
+        """PROOF普通地形配方追加main的站立关节速度与滑移项，各项乘一次控制周期。"""
 
-        tracking_linear_frame = "body"
-        body_ang_vel_frame = "body"  # 默认按HIM约束机身系xy角速度；heading可显式用于对照。
         tracking_linear_variance = 0.25
         tracking_angular_variance = 0.25
-        pose_tracking_gate = True  # 移动时以实际速度跟踪门控姿态奖励；站立保留原评分。
-        fall_angle = math.radians(70)
-        fall_softness_deg = 5.0
-        stand_still_command_threshold = 0.1  # 命令平移模长加偏航绝对值不超过阈值时启用。
-        foot_slip_command_threshold = 0.1  # 命令平移模长加偏航绝对值超过阈值时启用。
-        stumble_ratio = 5.0  # 水平接触力超过竖直接触力绝对值的该倍数时判为绊脚。
-        leg_collision_force_threshold = 1.0  # 任一腿部几何体对地接触力模严格超过该值时惩罚，N。
-        hip_pos_command_threshold = 0.1  # 侧移及转向命令绝对值均不超过阈值时约束髋角。
-        soft_landing_command_threshold = 0.1  # 命令平移模长加偏航绝对值超过阈值时约束落地力。
-
-        class gait:
-            """相位按来源足名配置；软接触只用于想象近似。"""
-
-            period = 0.6
-            offsets = {"FR": 0.0, "FL": 0.5, "RR": 0.5, "RL": 0.0}
-            stance_fraction = 0.56
-            command_threshold = 0.1
-            contact_height = 0.035  # 指定参考train.py稀有窗口采用的足端中心触地阈值，米。
-            contact_softness = 0.005  # 想象接触过渡宽度，米；属于本次软化适配。
-
-        class posture:
-            walking_threshold = 0.1
-            running_threshold = 1.5
-            std_standing = {"hip": 0.05, "thigh": 0.1, "calf": 0.15}
-            std_walking = {"hip": 0.15, "thigh": 0.35, "calf": 0.5}
-            std_running = {"hip": 0.15, "thigh": 0.35, "calf": 0.5}
+        fall_angle = 1.5
+        fall_softness_deg = 5.0  # 保留SuperMimic已有的想象倾角软失败。
+        base_contact_threshold = 5.0
+        command_threshold = 0.1
+        stand_still_command_threshold = 0.1  # main：命令平移模长加偏航绝对值不超过阈值时启用。
+        foot_slip_command_threshold = 0.1  # main：命令平移模长加偏航绝对值超过阈值时启用。
+        contact_force_threshold = 1.0
+        stumble_ratio = 4.0
+        torque_limit_nominal = 30.0
+        torque_soft_factor = 0.8
+        torque_hard_factor = 0.95
+        torque_over_soft_scale = 50.0
+        torque_over_hard_scale = 25.0
+        torque_clip = 50.0  # 来源奖励明确对限幅前PD力矩设置此上限。
+        feet_air_time_threshold = 0.5
+        contact_time_variance_clip = 0.5
 
         class scales:
-            track_linear_velocity = 2.0
-            track_angular_velocity = 2.0
-            is_terminated = -100.0  # 失败终止奖励率；想象端使用软失败概率，正常超时不罚。
-            action_rate_l2 = -0.1
-            joint_pos_limits = -10.0
-            body_ang_vel = -0.05
-            foot_gait = 0.5
-            feet_air_time = 0.2
-            pose = 0.5
-            lin_vel_z = -2.0
-            body_orientation_l2 = -0.2
-            smoothness = -0.01
-            stand_still = -2.0
-            stand_still_joint_vel_l2 = -0.1  # 仅在站立命令下约束关节速度，权重是待训练验证的初值。
+            track_lin_vel_xy_exp = 1.5
+            track_ang_vel_z_exp = 1.0
+            lin_vel_z_l2 = -1.0
+            ang_vel_xy_l2 = -0.05
+            stand_still = -1.0
+            stand_still_joint_vel_l2 = -0.1
             foot_slip = -0.1
-            joint_acc_l2 = -3.0e-7
-            stumble = -0.1
-            joint_torques_l2 = -2.0e-5
-            leg_collision = -1.0
-            angular_momentum = -0.025
-            hip_pos = -1.0
-            soft_landing = -3.0e-3
+            joint_hip_deviation_l2 = -0.2
+            joint_deviation_l2 = -2.5e-3
+            joint_acc_l2 = -2.5e-7
+            joint_torques_l2_soft_limit = -1e-4
+            joint_power_l1 = -2e-5
+            joint_pos_limits = -10.0
+            action_rate_l2 = -0.1
+            action_smoothness_l2 = -0.01
+            undesired_contacts = -1.0
+            feet_air_time = 0.5
+            feet_air_time_variance = -0.1
+            feet_stumble = -1.0
+            feet_slide = -2.5e-2
+            is_alive = 0.1
+            termination_penalty = -100.0

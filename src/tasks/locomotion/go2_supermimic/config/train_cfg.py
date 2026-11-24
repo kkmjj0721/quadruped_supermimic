@@ -51,7 +51,7 @@ class SuperMimicTrainConfig:
     wm_bf16: bool | None = None
     """覆盖世界模型MLP的BF16开关；需要原生BF16 CUDA设备，输出及状态积分仍为FP32。"""
     actor_bf16: bool | None = None
-    """覆盖策略MLP的BF16开关；归一化、MoE分组卷积、门控融合仍为FP32。"""
+    """覆盖策略MLP的BF16开关；观测归一化、潜变量融合与mask仍为FP32。"""
     critic_bf16: bool | None = None
     """覆盖价值MLP的BF16开关；输出、价值损失和返回递推仍为FP32。"""
     log_root: str = "logs/supermimic"

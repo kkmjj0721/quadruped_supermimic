@@ -11,13 +11,12 @@ from mjlab.envs import ManagerBasedRlEnv
 
 from agents.supermimic.interfaces import EnvStep, TaskState
 
-from ..config.env_cfgs import (
-    resolve_go2_supermimic_cfg, unitree_go2_flat_env_cfg, unitree_go2_rough_env_cfg,
-)
+from ..config.env_cfgs import resolve_go2_supermimic_cfg
+from ..go_supermimic_env_cfg import make_go2_supermimic_env_cfg
 from ..mdp.curriculums import CommandCurriculum, TerrainCurriculum
 from ..mdp.state_spec import (
     ACTION_DIM, COMMAND_TIMER, CONTEXT_DIM, CONTEXT_ENCODER_BIAS, CONTEXT_FRICTION,
-    CONTEXT_ORIGIN, CONTEXT_RANGES, CONTEXT_ZERO_PROBABILITY, JOINT_NAMES,
+    CONTEXT_EXTEROCEPTIVE_MASK, CONTEXT_ORIGIN, CONTEXT_RANGES, CONTEXT_ZERO_PROBABILITY, JOINT_NAMES,
     COMMAND_OVERRIDE,
 )
 from ..mdp.reference_task import Go2ReferenceTaskModel
@@ -40,8 +39,9 @@ class Go2TransitionAdapter:
         self.play = play
         self.no_terminations = no_terminations
         self.map = TerrainMap(self.cfg.terrain)
-        factory = unitree_go2_flat_env_cfg if self.cfg.terrain.mode == "flat" else unitree_go2_rough_env_cfg
-        env_cfg = factory(play=play, go2_cfg=self.cfg, terrain_map=self.map)
+        env_cfg = make_go2_supermimic_env_cfg(self.cfg, terrain_map=self.map)
+        if play:
+            del env_cfg.terminations["time_out"]
         if no_terminations:
             env_cfg.terminations = {}
         if video_height is not None:
@@ -71,6 +71,10 @@ class Go2TransitionAdapter:
                 episode_length_s=self.cfg.env.episode_length_s, device=self.device)
             if not self.map.plane:
                 self.terrain_curriculum.family_ids.copy_(terrain.terrain_types)
+            # 源mask名单没有flat；其余保留地形分别对应discrete、stairs、slope。
+            self.mask_eligible = torch.tensor([name != "flat" for name in self.map.family_names], device=self.device)
+            self.terrain_half_size = torch.tensor(
+                (self.map.rows * self.map.size[0] / 2 + 4., self.map.cols * self.map.size[1] / 2 + 4.), device=self.device)
             self.context_version = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
             self._state = None
             self._play_commands = None
@@ -137,6 +141,9 @@ class Go2TransitionAdapter:
         bounds, probability = self.command_curriculum.parameters(self.terrain_curriculum.family_ids[ids])
         context[:, CONTEXT_RANGES] = bounds
         context[:, CONTEXT_ZERO_PROBABILITY] = probability.squeeze(-1)
+        eligible = self.mask_eligible[self.terrain_curriculum.family_ids[ids]]
+        enabled = torch.rand(ids.numel(), device=self.device) >= self.cfg.teacher.exteroceptive_dropout
+        context[:, CONTEXT_EXTEROCEPTIVE_MASK] = (enabled | ~eligible).float()
         return context
 
     def _reset_rows(self, ids):
@@ -186,19 +193,25 @@ class Go2TransitionAdapter:
         physical = self.task.read_physical(self.raw_env).clone()
         if not torch.isfinite(physical).all():
             raise FloatingPointError("Go2 physical state contains non-finite values")
-        sensor = self.raw_env.scene["feet_ground_contact"].data
+        contact_sensor = self.raw_env.scene["feet_ground_contact"]
+        sensor = contact_sensor.data
         final = self.task.advance(before, actions, physical,
-                                  contact_times=(sensor.current_air_time.clone(), sensor.current_contact_time.clone())).detached_clone()
+                                  contact_times=(sensor.current_air_time.clone(), sensor.current_contact_time.clone(),
+                                                 sensor.last_air_time.clone(), contact_sensor.compute_first_contact(self.step_dt).float(),
+                                                 sensor.last_contact_time.clone())).detached_clone()
         if self._play_commands is not None:
             final.command.copy_(self._play_commands)
         terminated = (torch.zeros(self.num_envs, dtype=torch.bool, device=self.device) if self.no_terminations
                       else self.task.hard_termination(final))
         truncated = raw_truncated.clone()
+        if not self.map.plane and not self.no_terminations:
+            # 对齐官方：越过核心地形边界4米视为超时，不施加失败惩罚。
+            truncated |= (self.task.world_position(final)[:, :2].abs() > self.terrain_half_size).any(-1)
         terms = self.task.reward_terms(before, actions, final, terminated.float())
-        reward = (self.step_dt * sum(getattr(self.cfg.reward.scales, name) * value
+        reward = (self.step_dt * sum(self.task.reward_scales[name] * value
                                      for name, value in terms.items())).detach().clone()
         for name, value in terms.items():
-            self._episode_reward_sums[name].add_(self.step_dt * getattr(self.cfg.reward.scales, name) * value)
+            self._episode_reward_sums[name].add_(self.step_dt * self.task.reward_scales[name] * value)
         velocity = self.task.tracking_velocity(final)
         linear_error = velocity[:, :2] - before.command[:, :2]
         angular_error = velocity[:, 2] - before.command[:, 2]
@@ -216,13 +229,14 @@ class Go2TransitionAdapter:
             episode_metrics = {f"episode_reward/{name}": self._episode_reward_sums[name][done_ids].mean()
                                / self.cfg.env.episode_length_s for name in terms}
             self._reset_rows(done_ids)
-        self.last_metrics = {f"reward/{name}": value.mean() for name, value in terms.items()}
+        self.last_metrics = {f"reward/{name}": value.float().mean() for name, value in terms.items()}
         self.last_metrics.update(episode_metrics)
         self.last_metrics.update(terrain_level=self.terrain_curriculum.levels.float().mean(),
                                  command_stage_iteration=float(self.command_curriculum.iteration),
                                  tracking_linear_mse=linear_error.square().sum(-1).mean(),
                                  tracking_angular_mse=angular_error.square().mean(),
                                  action_rms=actions.square().mean().sqrt(),
+                                 exteroceptive_fraction=self.task.actor_mask(before).mean(),
                                  base_height=self.task.physical_features(final)[:, 0].mean(),
                                  # 参考 train.py:406 的诊断量：机体系偏航角速度超过 3 rad/s 的比例，用于发现打转。
                                  fast_yaw=(final.physical[:, ANGULAR_BODY][:, 2].abs() > 3.0).float().mean())

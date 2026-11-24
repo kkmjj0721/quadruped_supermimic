@@ -20,7 +20,7 @@ from mjlab.terrains import TerrainEntityCfg, TerrainGeneratorCfg
 
 
 def reference_generator(cfg) -> TerrainGeneratorCfg:
-    """复现legged_wbc_mjlab@4eb8fcf的ri_5036_him地形生成配置。"""
+    """复用ri_5036_him地形，追加PROOF普通地形阶段的正反金字塔斜坡。"""
     from mjlab.terrains import BoxRandomGridTerrainCfg
     from mjlab.terrains.config import ROUGH_TERRAINS_CFG
 
@@ -30,7 +30,8 @@ def reference_generator(cfg) -> TerrainGeneratorCfg:
     terrain.num_rows, terrain.num_cols = cfg.core_rows, cfg.num_cols
     terrain.border_width = cfg.outer_flat_width_m
     terrain.curriculum = True
-    for name in ("hf_pyramid_slope", "hf_pyramid_slope_inv", "wave_terrain", "random_rough"):
+    slopes = {name: terrain.sub_terrains.pop(name) for name in ("hf_pyramid_slope", "hf_pyramid_slope_inv")}
+    for name in ("wave_terrain", "random_rough"):
         terrain.sub_terrains.pop(name)
     terrain.sub_terrains["box_random_grid"] = BoxRandomGridTerrainCfg(
         proportion=0.05, grid_width=0.8, grid_height_range=(0.02, 0.10),
@@ -46,6 +47,12 @@ def reference_generator(cfg) -> TerrainGeneratorCfg:
                 border_width=border_width, platform_width=2.499999, holes=False, proportion=0.05,
             )
     terrain.sub_terrains["flat"].proportion = 0.06941176470588235
+    # 斜坡追加在原有十类之后，保持已有地形的生成顺序与随机流。
+    for name, platform_width in (("hf_pyramid_slope", 2.0), ("hf_pyramid_slope_inv", 3.0)):
+        terrain.sub_terrains[name] = replace(
+            slopes[name], slope_range=(0.0, 0.45), platform_width=platform_width,
+            border_width=0.10, proportion=0.10,
+        )
     return terrain
 
 
@@ -64,7 +71,7 @@ def clean_look(terrain):
 
 
 class TerrainMap:
-    """Ri-5036 HIM的十种地形各占一列，六行按生成器difficulty递增。"""
+    """十二种普通地形各占一列，六行按生成器difficulty递增。"""
 
     def __init__(self, cfg):
         self.cfg = deepcopy(cfg)

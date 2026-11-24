@@ -1,28 +1,20 @@
 <!-- Copyright (c) 2026-2027 zh -->
 
-# Go2 SuperMimic 任务来源
+# Go2 PROOF 教师任务来源
 
-当前任务由 `mdp/reference_task.py`、`reference_state.py`、`reference_rewards.py`、`commands.py`、`gait_rewards.py`、`rl/world_model.py` 与集中配置定义。默认使用8专家历史结构，每专家输出32维潜特征＋3维当前机身线速度；SuperMimic想象BPTT与真实速度MSE共同训练。命令／接触奖励沿用HIM来源，不包含CTS教师或蒸馏。配置与使用见 [任务说明](../../../../docs/go2_supermimic.md)。
+当前教师以用户指定的 [proof-loco@ae910b821d635f04226489df80bdd77d1d7b0b82](https://github.com/syw-robotics/proof-loco/tree/ae910b821d635f04226489df80bdd77d1d7b0b82) 为基准，适配本项目Go2／MjLab／SuperMimic。论文结构与该后续重实现存在差异，当前采用代码的32+32+45 actor输入，不采用论文64+64结构。
 
-| 来源 | 固定版本与实际位置 | 采用内容与差异 |
-| --- | --- | --- |
-| SuperMimic 英文论文 | [本地 v1](../../../../paper/SuperMimic_2610.28480v1.pdf)，§3、公式1～3、表A.6 | 世界模型/BPTT方法及速度任务奖励的初始依据；当前按用户要求改为body平移、偏航分母0.25并移除新训练侧倾。无动作模仿先验，不能宣称复现论文速度实验成绩 |
-| 指定 Go2 实现 | [Zhengtianjin/go2-supermimic](https://github.com/Zhengtianjin/go2-supermimic/tree/d9eee9b3f248e5300e636c433255db2c1c3e086a)，`supermimic/{train,world_model,buffer,imagine}.py`、`env/{env_cfg,terrains}.py`、`target/terrain.py`、`robot/go2.py` | 参考状态/位姿增量、训练算法与预算、倾角终止、地形／课程／随机化；原追逐/闪避改为盲速度任务，actor改MoE。当前模型输入239含编码器偏置及52维瞬时辅助量，输出125；动作比例保留用户当前按关节类型的显式设置。算法来源及差异见 [算法说明](../../../../agents/supermimic/NOTICE.md) |
-| 参考 Go2 资产 | 指定Go2仓库与其 Menagerie 来源 | 模型、关节顺序和碰撞适配本项目；原始许可和归属见 [资产说明](../../../../src/assets/robots/go2/REFERENCE_NOTICE.md) |
-| Go2内置位置执行器 | `/home/sunteng/projects/legged_wbc_mjlab@4eb8fcf71124b20ed4a1154b6c724ba962a424f8`，`src/assets/robots/go2/go2_constants.py`、`src/config/go2/go2_config.py` | 按用户要求替换为 `BuiltinPositionActuatorCfg`，同步 PD 增益、力矩上限、armature 与延迟参数；仍使用本项目的参考 MJCF 与碰撞配置 |
-| 地形难度升降 | 同提交 `go2_him/go2_him_env_cfg.py:497`、转导的 `ri_4438_him/mdp/curriculums.py:terrain_levels_vel`、`mdp/velocity_command.py:HeadingHoldVelocityCommand`及MjLab1.6 `TerrainEntity.update_env_origins` | 仅迁入按行走表现升降、命令距离积分及最高级随机回落；保留当前Ri-5036地形布局和零级起点，不迁入速度课程。真实adapter在命令推进前结算，沿用本项目forward后终态位置读取；不宣称与来源完整物理轨迹数值相同 |
-| HIM命令及接触奖励 | `/home/sunteng/projects/legged_wbc_mjlab`，`e6209ec3d910b57673d5cbba1d3ca798a7fa3113`；`go2_him/config/env_cfgs.py`、`ri_4438_him/mdp/{rewards,gait,velocity_command}.py` 和 MjLab1.6 `velocity_command.py` | 用户指定的周期／权重、逐脚接触相位与当前时长评分、heading采样逻辑；4–12秒重采样、无速度课程。新训练vx/vy恢复来源的±1范围，原±4实验仅保留在冻结归档中；heading反馈增益保留。真实端读取原生接触计时；想象端共用世界模型受监督的found概率并连续计时，属于本项目可微适配 |
-| 策略相位 | `/home/sunteng/projects/legged_wbc_mjlab@4eb8fcf71124b20ed4a1154b6c724ba962a424f8`，`ri_4438_him/mdp/observations.py:phase`与`gait.py:gait_phase` | 新训练在原45维末尾追加sin／cos，与现有步态周期和站立门控共用时钟；HIM相位在command后且使用6帧，本项目追加末尾、使用5帧与SuperMimic，不宣称完整HIM复现。该版本实际未启用足高奖励，本项目不增加足高目标 |
-| 姿态奖励 | 同一仓库 `go2_ppo/mdp/rewards.py:variable_posture`、`go2_ppo/config/env_cfgs.py` | 按命令速度选逐关节std的指数奖励，保留本项目默认姿态，不移入HIM地形容差版本 |
-| 垂向速度／倾斜／动作二阶差分 | 同一仓库 `ri_4438_him/mdp/rewards.py:lin_vel_z/body_orientation_l2`，来源安装的MjLab1.6 `envs/mdp/rewards.py:action_acc_l2`、`managers/action_manager.py:process_action/reset` | 使用body-z速度平方、机身重力xy平方和、未缩放动作二阶差分平方和。权重按用户要求-2／-.2／-.01；记忆42保留前两步动作，critic另含瞬时辅助量 |
-| 站立／足端滑移／关节加速度 | 同一仓库 `go2_him/go2_him_env_cfg.py`、`ri_4438_him/mdp/rewards.py:stand_still`；来源MjLab1.6 `tasks/velocity/mdp/rewards.py:feet_slip`、`envs/mdp/rewards.py:joint_acc_l2` | 当前权重-2.0／-.1／-2.5e-7，其中站立权重按用户要求覆盖来源-.5；站立／滑移命令阈值均.1。真实端使用默认角平方偏差、世界瞬时足速与found、qacc；想象端使用扩展连续量与sigmoid接触概率，接触logit归一化固定0／1。当前adapter最后forward后的读取与原生manager前的计算时序不同，不宣称轨迹数值等价；新增头与概率监督属于本项目适配，非论文原有结构 |
-| 站立关节速度 | 来源安装的MjLab1.6 `envs/mdp/rewards.py:joint_vel_l2`；本项目 `mdp/reference_rewards.py:stand_still_joint_vel_l2` | 复用关节速度平方和公式，新增与站立角度项相同的起点命令门控；−0.1是本项目待训练验证的初值，不是来源推荐权重。真实／想象复用原有关节速度状态，不增加模型维度 |
-| 绊脚／关节力矩 | `/home/sunteng/projects/legged_wbc_mjlab@4eb8fcf71124b20ed4a1154b6c724ba962a424f8`，`go2_him/go2_him_env_cfg.py:407,481`、转导的 `ri_4438_him/mdp/rewards.py:488` 及来源MjLab1.6 `envs/mdp/rewards.py:32` | 按用户指定权重−.1／−2e−5与比值5：任一脚世界净接触力xy模长严格大于5倍竖直力绝对值；实际actuator_force平方和。真实端采集力，想象端预测下一绝对力并共用公式；硬绊脚无直接局部梯度，不擅自软化。新增24个连续辅助量属于本项目模型适配，预测质量与控制效果未验证；历史97／234协议仅保留在冻结归档中 |
-| 腿部碰撞 | 同一提交 `go2_him/go2_him_env_cfg.py:465`、`config/env_cfgs.py:97` 与来源MjLab1.6 `tasks/velocity/mdp/terminations.py:illegal_contact` | 权重−1、力阈值1 N、逐环境any硬判定。传感器沿用none／单槽／单帧历史，匹配本项目小腿几何体时允许collision后的数字；仅腿部对地，不含足端和自碰。真实端将历史力模最大值压为一个N单位辅助量，想象端连续预测该量并共用严格大于阈值的公式，无直接局部梯度，不替换成概率奖励；当前v7物理125／critic262，历史v4／v5／v6协议和奖励仅保留在冻结归档中，预测与控制效果待验证 |
-| 机体系倾转角速度 | 同一HIM提交 `ri_4438_him/mdp/rewards.py:88` 的 `body_angular_velocity_penalty` | 按用户后续要求，新默认 `body_ang_vel` 直接计算body角速度xy平方和，权重−.05不变；历史独立paper实验保留原定义；物理／actor／critic宽度不变 |
-| 机体系平移／角动量／髋关节／落地 | `legged_wbc_mjlab@4eb8fcf71124b20ed4a1154b6c724ba962a424f8`，`ri_4438_him/mdp/rewards.py:26,79,413`、MjLab1.6 `tasks/velocity/mdp/rewards.py:356`与`ContactSensor.compute_first_contact` | 平移按body-xy，偏航仅按用户要求将分母改0.25、仍world-z；新增三项权重沿用来源−.025／−.5／−.002。角动量取既有root_angmom并旋转到heading，norm²严格不变；髋项保留侧移／偏航门控。真实落地保留硬时间窗口；想象按用户确认用条件时长及接触概率加权，是代理而非严格无偏期望。新增3维连续头后物理125／critic262；当前速度监督主线使用独立新格式；旧实验保留在冻结归档中，效果未训练验证 |
-| MjLab / MuJoCo | 本机 MjLab1.6.0、MuJoCo3.11.0、MuJoCo-Warp3.11.0；参考本地环境MuJoCo3.17.0、MuJoCo-Warp3.13.0 | 参数与算法按参考；来源依赖未固定MuJoCo/Warp版本，不能声称两环境轨迹数值一致。当前Warp无来源的迭代告警位，省略对应纯日志startup事件，不增加兼容回退。终端摘要保留当前格式 |
+| 本项目位置 | 上游实际位置 | 对齐内容及适配 |
+|---|---|---|
+| `mdp/reference_task.py`、`state_spec.py` | PROOF `go2_parkour/mdp_cfg/observations_cfg.py`、`config/vanilla_heightmap_parkour_env_cfg.py`，本项目main的任务记忆 | 10帧45维本体、当前162点高程、80维特权状态；Critic另追加43维main式奖励／命令记忆，总285；高程9×18按x内层展开，body到地面高度减0.25；保留作者逐项clip与本体噪声，高程无噪声；本项目关节顺序及足端site不变 |
+| `rl/transition_adapter.py`、`mdp/reference_task.py` | `mdp_cfg/events_cfg.py`、`mdp/events.py` | 回合级高程mask，普通地形40%关闭；flat未在作者名单中，因此平地家族始终开启；当前随机格块映射discrete，台阶与斜坡映射对应普通地形 |
+| `mdp/reference_rewards.py`与集中reward配置 | `mdp_cfg/rewards_cfg.py`、`mdp/rewards.py`及`use_pretrain_terrain(True)` | 20项基础奖励公式对齐源码，实际权重以集中配置为准。预训练删除stuck、cheat、穿透；时长方差函数实际在非parkour生效，保留该实现，不按名称擅自反转；所有奖励乘一次dt，50Hz失败项为-2/step |
+| `foot_slip`、`stand_still_joint_vel_l2` | 本项目`main@9c3a8ad5658dbef1acf4ff98997b64d01e45f90d`的`mdp/reference_rewards.py`及集中reward配置 | 按用户要求追加两项，权重均为−0.1，总计22项；沿用平移命令模长加偏航绝对值的0.1阈值，滑移使用瞬时found与世界水平足速平方，站立使用关节速度平方和。保留PROOF原有feet_slide及其接触历史定义；复用现有状态与想象接触概率，不增加模型维度 |
+| 接触与力矩辅助量 | 作者LocoLab [37e567d](https://github.com/syw-robotics/LocoLab/tree/37e567d81ec0198a8984b5c5650cd4489d3a56d3)，`velocity/mdp/{rewards,observations}.py` | 当前足净力先从MuJoCo对地反作用力转换为作用于机器人的世界力，再按正分量>1N后减0.5；滑移使用3物理步历史；非期望接触只计calf。当前资产足端属于calf，按每腿calf几何体净和并排除足几何。限幅前PD力矩从native仿射力模型与实际延迟ctrl恢复，施加力矩另外记录 |
+| `mdp/reference_kinematics.py` | 当前Go2 MJCF及原有BlinkMimic FK | 足高按各足yaw方向的四个±0.015m点平均地面；射线起点的+20m不进入高度。想象的last时长／首次落地是接触概率连续代理，真实端读取原生传感器 |
+| `mdp/terrains.py` | 原Ri-5036 HIM地形与PROOF `utils/terrains/terrains_cfg.py` | 保留原十类并末尾追加正反光滑金字塔坡，梯度0–0.45、平台2/3m；使用MjLab原生高度场，不复制作者额外roughness。课程保持原六级，整图居中引起原块y坐标平移-8m，局部几何不变 |
+| 终止 | PROOF `mdp_cfg/terminations_cfg.py` | 倾角>1.5rad、base历史净力>5N为失败；20s超时与核心边界外4m为truncation。想象倾角软失败保留现有SuperMimic，base接触使用来源硬阈值 |
 
-失败终止惩罚参考 `legged_wbc_mjlab` 工作区（HEAD `e148f2c13a2d118de8d41b1f9d9274316ac3d8fe`）的 `src/tasks/locomotion/go2_him/go2_him_env_cfg.py:402` 及 MjLab 1.6 的 `envs/mdp/rewards.py:is_terminated`。本项目真实端使用任务失败标记，正常超时不罚；想象端沿用已有软失败概率并保留梯度。两端统一按配置权重乘一次控制周期；新训练共22项奖励，历史未启用该项的实验仅保留在冻结归档中。参考项的引入不代表已验证训练收益。
+Go2资产、执行器PD、动作尺度、物理随机化、命令采样、行走表现课程及SuperMimic训练预算沿用本项目。参考实现为IsaacLab3／PhysX，本项目为MjLab1.6／MuJoCo；不将代码对拍或短时训练当作作者性能复现或真机验证。原资产与FK来源说明、`LICENSE_blinkmimic`保持原归属。
 
-短流程只验证实现与运行接口，不能证明长期行走收敛、论文性能或真机部署效果。当前任务和验证范围见 [任务说明](../../../../docs/go2_supermimic.md)。
+算法、加速与第三方许可见 [算法来源说明](../../../../agents/supermimic/NOTICE.md)，配置、运行与三输入导出接口见 [算法与任务说明](../../../../agents/README.md)。

@@ -27,11 +27,10 @@ from src.runtime import configure_cuda_libdevice
 
 from ..config.loading import (
     apply_settings as _apply_settings, read_settings as _read_settings,
-    configuration_for_settings,
+    configuration_for_settings, algorithm_config,
 )
 from ..config.train_cfg import SuperMimicTrainConfig, TASK_MODES
-from ..go_supermimic_env_cfg import validate_config
-from .runner import algorithm_config, make_go2_supermimic_runner
+from .runner import make_go2_supermimic_runner
 
 
 # ---------- 参数与任务配置 ----------
@@ -109,7 +108,6 @@ def _resolve_task_config(task_id: str, args: SuperMimicTrainConfig):
     ExecutionConfig(**{field.name: getattr(cfg.runner, field.name) for field in fields(ExecutionConfig)})
     _integer(cfg.env.num_envs, 2, "Task environment count")
     _integer(cfg.env.seed, 0, "Task seed")
-    validate_config(cfg)
     algorithm_config(cfg)
     return cfg, resume, source
 

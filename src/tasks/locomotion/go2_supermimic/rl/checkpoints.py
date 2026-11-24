@@ -14,15 +14,16 @@ from pathlib import Path
 import torch
 
 from agents.supermimic.config import SuperMimicConfig
+from agents.supermimic.interfaces import AlgorithmSpec
+from agents.supermimic.export import export_policy
 from agents.supermimic.policy import make_actor
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
 from ..config.train_cfg import TASK_MODES
-from ..go_supermimic_env_cfg import validate_config
+from ..config.loading import validate_config
 from ..mdp.reference_task import Go2ReferenceTaskModel
-from .runner import algorithm_config
 from ..config.loading import (
-    apply_settings, read_settings, configuration_for_settings,
+    apply_settings, read_settings, configuration_for_settings, algorithm_config,
 )
 
 
@@ -60,7 +61,7 @@ def load_playback_source(task_id: str, checkpoint_file: str | Path) -> PlaybackS
         raise ValueError("Playback task terrain mode differs from the saved configuration")
     # 与训练保持相同的可信文件约定；只把所需策略装配到目标设备。
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_moe_velocity_v1":
+    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_proof_teacher_v1":
         raise ValueError("Incompatible SuperMimic checkpoint format")
     task_metadata = checkpoint.get("go2_task")
     if (not isinstance(task_metadata, dict) or not isinstance(task_metadata.get("curriculum"), dict)
@@ -103,3 +104,71 @@ def build_playback_policy(source: PlaybackSource, adapter) -> torch.nn.Module:
     policy.eval()
     policy.requires_grad_(False)
     return policy
+
+
+def checkpoint_actor(checkpoint: dict):
+    """只从检查点装配actor；部署不分任务策略之外的世界模型与critic。"""
+    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_proof_teacher_v1":
+        raise ValueError("Incompatible SuperMimic velocity-policy checkpoint format")
+    if not isinstance(checkpoint.get("config"), dict) or not isinstance(checkpoint.get("spec"), dict):
+        raise ValueError("Checkpoint is missing the algorithm configuration or task specification")
+    if any(not torch.isfinite(value).all() for value in checkpoint["actor"].values()):
+        raise ValueError("Checkpoint contains non-finite policy tensors")
+    spec = AlgorithmSpec(**checkpoint["spec"])
+    if not spec.semantic_id.startswith("go2_proof_teacher_"):
+        raise ValueError("Checkpoint does not describe a Go2 SuperMimic task")
+    if checkpoint["format"] != spec.model_id:
+        raise ValueError("Checkpoint format differs from the policy model identifier")
+    algorithm = SuperMimicConfig(**checkpoint["config"])
+    if spec.observation_dim != 45:
+        raise ValueError(f"Unsupported Go2 policy observation dimension: {spec.observation_dim}")
+    if spec.history_length != 10:
+        raise ValueError(f"Unsupported Go2 policy history length: {spec.history_length}")
+    terms = Go2ReferenceTaskModel.observation_term_dims
+    actor = make_actor(spec, algorithm, terms)
+    actor.load_state_dict(checkpoint["actor"], strict=True)
+    return actor.eval().requires_grad_(False), algorithm
+
+
+def export_checkpoint(checkpoint_path: str | Path, directory: str | Path, *, iteration: int | None = None):
+    """读取检查点与同目录任务快照，导出PT/ONNX/JSON三件套。"""
+    path = Path(checkpoint_path).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Checkpoint file not found: {path}")
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_proof_teacher_v1":
+        raise ValueError(f"Not a SuperMimic checkpoint: {path}")
+    execution = checkpoint["execution"]
+    if not isinstance(execution, dict):
+        raise ValueError("Checkpoint execution configuration must be an object")
+    actor_bf16 = execution["actor_bf16"]
+    if not isinstance(actor_bf16, bool):
+        raise ValueError("Checkpoint execution.actor_bf16 must be a boolean")
+    # 任务快照与播放共用同一份可信来源和同一套覆盖规则。
+    snapshot_path = path.parent / "task_config.json"
+    settings, wrapped = read_settings(snapshot_path)
+    if not wrapped:
+        raise ValueError(f"Export requires a complete task snapshot: {snapshot_path}")
+    cfg = configuration_for_settings(settings)
+    apply_settings(cfg, settings, replace_mappings=True)
+    if json.loads(snapshot_path.read_text(encoding="utf-8")).get("spec_hash") != checkpoint.get("spec_hash"):
+        raise ValueError("Checkpoint and task snapshot metadata mismatch")
+    validate_config(cfg)
+    expected_width = 45
+    if (checkpoint["spec"]["observation_dim"] != expected_width
+            or cfg.env.num_observations != expected_width
+            or checkpoint["spec"]["history_length"] != cfg.env.num_obs_history
+            or cfg.env.num_obs != expected_width * cfg.env.num_obs_history
+            or checkpoint["spec"]["heightmap_dim"] != cfg.env.heightmap_dim):
+        raise ValueError("Checkpoint observation layout differs from the saved task configuration")
+    actor, algorithm = checkpoint_actor(checkpoint)
+    iteration = checkpoint["iteration"] if iteration is None else iteration
+    if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
+        raise ValueError("Export iteration must be a nonnegative integer")
+    from .deployment import deployment_metadata
+
+    metadata = deployment_metadata(cfg, spec_hash=checkpoint["spec_hash"], algorithm=algorithm)
+    # 离线重建的 actor 使用 FP32；训练来源精度由检查点执行配置保留。
+    metadata["source_network_precision"] = "bf16" if actor_bf16 else "fp32"
+    return export_policy(actor, Path(directory).expanduser().resolve(), iteration=iteration,
+                         metadata=metadata)

@@ -33,7 +33,7 @@ class Imagination:
                                if config.compile_imagination else self._lambda_returns)
 
     def _step(self, state: TaskState, history: Tensor):
-        action = self.actor(history)
+        action = self.actor(history, self.task.actor_heightmap(state), self.task.actor_mask(state))
         with torch.no_grad():
             features = self.task.privileged(state)
         predicted = self.model(state, action)

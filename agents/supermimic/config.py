@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：声明混合专家历史策略的训练预算、预热排期和显式资源覆盖参数。"""
+"""内容：声明高程图教师策略的训练预算、预热排期和显式资源覆盖参数。"""
 
 from dataclasses import dataclass
 import math
@@ -25,7 +25,7 @@ class ExecutionConfig:
     metric_interval: int = 1  # 设备指标汇总及TensorBoard写入间隔；护栏和learn返回强制完成窗口。
     replay_history_storage: str = "frames"  # 默认只保存实际带噪单帧；full保留完整历史作显式对照。
     wm_bf16: bool = False  # 仅世界模型MLP使用CUDA BF16；监督和想象共享该边界。
-    actor_bf16: bool = False  # 仅策略MLP使用CUDA BF16；MoE卷积、融合与归一化保留FP32。
+    actor_bf16: bool = False  # 策略MLP使用CUDA BF16；潜变量融合与观测归一化保留FP32。
     critic_bf16: bool = False  # 仅价值MLP使用CUDA BF16；输出和返回递推保留FP32。
 
     def __post_init__(self):
@@ -60,10 +60,11 @@ class SuperMimicConfig:
     lam: float = 0.95
     actor_hidden: tuple[int, ...] = (512, 256, 128)
     critic_hidden: tuple[int, ...] = (512, 256, 128)
-    moe_expert_num: int = 8
-    moe_hidden: tuple[int, ...] = (512, 256, 128)
-    moe_latent_dim: int = 32
-    velocity_loss_coef: float = 1.0  # 同时刻机身系xyz线速度MSE的权重，潜特征维度不包含这3维。
+    prop_encoder_hidden: tuple[int, ...] = (128, 64)
+    height_encoder_hidden: tuple[int, ...] = (64, 32)
+    prop_latent_dim: int = 32
+    height_latent_dim: int = 32
+    velocity_loss_coef: float = 1.0  # 同时刻机身系xyz线速度MSE，监督本体latent的前三维。
     learning_rate: float = 2e-4
     actor_lr_scale: float = 1.0
     actor_optimizer: str = "adam"  # muon_adam将策略全部Linear权重交给Muon，其余参数使用Adam。
@@ -100,7 +101,7 @@ class SuperMimicConfig:
             raise ValueError("muon_weight_decay must be finite and nonnegative")
         positive = ("replay_capacity", "wm_window", "wm_batch",
                     "wm_updates", "imag_batch", "horizon", "lr_decay_iterations", "critic_epochs",
-                    "critic_minibatches", "collapse_interval", "moe_expert_num", "moe_latent_dim")
+                    "critic_minibatches", "collapse_interval")
         for name in positive + ("warmup_iterations", "wm_rewarmup_iterations", "critic_warmup_iterations", "actor_ramp_iterations", "archive_size"):
             value = getattr(self, name)
             minimum = 1 if name in positive else 0
@@ -109,7 +110,7 @@ class SuperMimicConfig:
         if (isinstance(self.collect_steps, bool) or not isinstance(self.collect_steps, (int, float))
                 or not math.isfinite(self.collect_steps) or self.collect_steps < 1):
             raise ValueError("collect_steps must be a finite number >= 1")
-        for name in ("wm_hidden", "actor_hidden", "critic_hidden", "moe_hidden"):
+        for name in ("wm_hidden", "actor_hidden", "critic_hidden"):
             values = tuple(getattr(self, name))
             if not values or any(isinstance(x, bool) or not isinstance(x, int) or x < 1 for x in values):
                 raise ValueError(f"{name} must contain positive integer widths")

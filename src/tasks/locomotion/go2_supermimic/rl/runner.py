@@ -16,6 +16,7 @@ from agents.supermimic.export import export_policy_onnx
 from agents.supermimic.runner import SuperMimicRunner
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
+from ..config.loading import algorithm_config
 from .transition_adapter import make_go2_supermimic_env
 from .deployment import deployment_metadata
 from .world_model import Go2WorldModel
@@ -29,15 +30,6 @@ def _save_timing(timing, name):
         yield
     finally:
         timing.record_wall(name, time.perf_counter() - started)
-
-
-def algorithm_config(cfg):
-    """在JSON覆盖后重新执行dataclass验证，把任务侧驱动配置并入算法预算。"""
-    driver = cfg.runner.driver
-    values = {field.name: getattr(cfg.algo, field.name) for field in fields(SuperMimicConfig)}
-    values.update(driver_frac=driver.frac, expert_frac=driver.expert_frac,
-                  driver_fade=tuple(driver.fade_iterations))
-    return SuperMimicConfig(**values)
 
 
 class Go2SuperMimicRunner(SuperMimicRunner):
@@ -56,7 +48,7 @@ class Go2SuperMimicRunner(SuperMimicRunner):
         for name, value in self.env.last_metrics.items():
             if name.startswith("reward/"):
                 term = name.removeprefix("reward/")
-                weight = getattr(self.env.cfg.reward.scales, term)
+                weight = self.task.reward_scales[term]
                 metrics[f"task/reward_raw/{term}"] = value
                 metrics[f"task/reward/{term}"] = self.env.step_dt * weight * value
                 metrics[f"Reward_Rate/{term}"] = weight * value
@@ -78,7 +70,8 @@ class Go2SuperMimicRunner(SuperMimicRunner):
         self.deterministic_collection_mask = self._fixed_collection_mask
         if self.task.cfg.runner.standing_zero_noise:
             command = self.current.command
-            standing = command[:, :2].norm(dim=-1) + command[:, 2].abs() <= self.task.cfg.reward.stand_still_command_threshold
+            threshold = self.task.cfg.reward.command_threshold
+            standing = (command[:, :2].square().sum(-1) <= threshold ** 2) & (command[:, 2].abs() <= threshold)
             self.deterministic_collection_mask = self._fixed_collection_mask | standing
         cfg = self.config
         if self.driver is None and self.expert is None:
@@ -91,10 +84,11 @@ class Go2SuperMimicRunner(SuperMimicRunner):
         driven = index >= num_envs - driver_count
         expert = (index >= num_envs - driver_count - expert_count) & ~driven
         if driven.any():
-            # 盲速度任务以HIM命令为目标，外部驱动只接管动作，不改变其余环境的命令。
+            # 当前任务以保留的HIM命令为目标，外部驱动只接管动作，不改变其余环境的命令。
             action = torch.where(driven[:, None], self.driver.act(observation), action)
         if expert.any():
-            action = torch.where(expert[:, None], self.expert.act(observation), action)
+            action = torch.where(expert[:, None], self.expert.act(
+                observation, self.task.actor_heightmap(self.current), self.task.actor_mask(self.current)), action)
         if driven.any() or expert.any():
             self._driver_metrics = {"driver/env_count": float(driver_count), "driver/expert_env_count": float(expert_count)}
         return action

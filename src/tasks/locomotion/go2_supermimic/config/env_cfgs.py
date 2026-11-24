@@ -7,7 +7,8 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
-from ..go_supermimic_env_cfg import make_go2_supermimic_env_cfg, validate_config
+from ..go_supermimic_env_cfg import make_go2_supermimic_env_cfg
+from .loading import validate_config
 
 
 def resolve_go2_supermimic_cfg(

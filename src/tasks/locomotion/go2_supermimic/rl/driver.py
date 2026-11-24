@@ -60,10 +60,10 @@ class MoeCtsDriver:
 
     @torch.no_grad()
     def act(self, observation):
-        """observation 为本项目45维本体观测，顺序角速度、重力、关节位置、关节速度、动作、命令。"""
+        """observation 为本项目45维本体观测，顺序角速度、重力、命令、关节位置、关节速度、动作。"""
         angular, gravity = observation[:, 0:3], observation[:, 3:6]
-        joint_pos, joint_vel = observation[:, 6:18], observation[:, 18:30]
-        command = observation[:, 42:45]
+        joint_pos, joint_vel = observation[:, 9:21], observation[:, 21:33]
+        command = observation[:, 6:9]
         # 本项目关节位置相对自身默认角；预训练策略期望相对它自己的默认角。
         relative_joint_pos = self._ordered(joint_pos) + self.our_default - self.pretrained_default
         frame = torch.cat((angular * _ANGULAR_SCALE, gravity, command * self.command_scale, relative_joint_pos,
@@ -87,10 +87,10 @@ class MoeCtsDriver:
 
 
 class ActorDriver:
-    """把已有盲速度策略作为数据来源，保存专家自己的历史而不参与策略更新。"""
+    """把已有PROOF教师策略作为数据来源，保存专家自己的历史而不参与策略更新。"""
 
     def __init__(self, path, observation_dim, action_dim, device):
-        from .deployment import checkpoint_actor
+        from .checkpoints import checkpoint_actor
 
         checkpoint = torch.load(Path(path), map_location=device, weights_only=False)
         self.actor, _ = checkpoint_actor(checkpoint)
@@ -101,7 +101,7 @@ class ActorDriver:
         self.fresh = None
 
     @torch.no_grad()
-    def act(self, observation):
+    def act(self, observation, heightmap, mask):
         if self.history is None:
             self.history = observation[:, None].repeat(1, self.actor.history_length, 1)
             self.fresh = torch.zeros(observation.shape[0], dtype=torch.bool, device=observation.device)
@@ -109,7 +109,7 @@ class ActorDriver:
             history = torch.cat((self.history[:, 1:], observation[:, None]), 1)
             self.history = torch.where(self.fresh[:, None, None], observation[:, None].expand_as(history), history)
             self.fresh.zero_()
-        return self.actor(self.history)
+        return self.actor(self.history, heightmap, mask)
 
     def reset(self, done):
         """专家回合结束后，用新回合首帧填满其历史。"""
