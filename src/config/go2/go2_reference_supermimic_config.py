@@ -87,7 +87,7 @@ class Go2ReferenceCfg(BaseConfig):
         heightmap_dim = 162
 
     class teacher:
-        """官方普通地形回合级高程latent遮蔽；平地家族保持未遮蔽。"""
+        """普通地形回合级高程latent遮蔽；平地与梅花桩始终开启高程。"""
 
         exteroceptive_dropout = 0.4
 
@@ -191,21 +191,21 @@ class Go2ReferenceCfg(BaseConfig):
         enable_self_collision = True
 
     class init_state:
-        pos = [0.0, 0.0, 0.4]
+        pos = [0.0, 0.0, 0.29]
         default_joint = {
             **{f"{leg}_hip_joint": 0.1 if leg in ("FL", "RL") else -0.1 for leg in ("FL", "FR", "RL", "RR")},
-            **{f"{leg}_thigh_joint": 0.8 if leg in ("FL", "FR") else 1.0 for leg in ("FL", "FR", "RL", "RR")},
-            **{f"{leg}_calf_joint": -1.5 for leg in ("FL", "FR", "RL", "RR")},
+            **{f"{leg}_thigh_joint": 0.9 for leg in ("FL", "FR", "RL", "RR")},
+            **{f"{leg}_calf_joint": -1.8 for leg in ("FL", "FR", "RL", "RR")},
         }
 
     class terrain:
-        """Ri-5036 HIM地形追加正反金字塔斜坡；难度采用原有行走表现课程。"""
+        """Ri-5036 HIM地形追加正反斜坡与梅花桩；难度采用原有行走表现课程。"""
 
         mode = "flat"
         seed = None
         patch_size_m = (8.0, 8.0)
         core_rows = 6
-        num_cols = 20  # 沿用参考配置；MjLab课程模式按十二种子地形实际生成十二列。
+        num_cols = 20  # 沿用参考配置；MjLab课程模式按十三种子地形实际生成十三列。
         outer_flat_width_m = 20.0
         max_init_level = 0
         curriculum = True
@@ -246,14 +246,16 @@ class Go2ReferenceCfg(BaseConfig):
         rel_forward_envs = 0.05
 
     class reward:
-        """PROOF普通地形配方追加main的站立关节速度与滑移项，各项乘一次控制周期。"""
+        """PROOF普通地形配方复用main站立平方项、pose及关节速度／滑移项，各项乘一次控制周期。"""
 
         tracking_linear_variance = 0.25
         tracking_angular_variance = 0.25
+        pose_tracking_gate = True  # main：移动时按实际速度跟踪门控，站立保留原姿态分。
         fall_angle = 1.5
         fall_softness_deg = 5.0  # 保留SuperMimic已有的想象倾角软失败。
         base_contact_threshold = 5.0
         command_threshold = 0.1
+        stuck_velocity_threshold = 0.1  # PROOF：平移命令高于阈值而body水平速度低于阈值时惩罚。
         stand_still_command_threshold = 0.1  # main：命令平移模长加偏航绝对值不超过阈值时启用。
         foot_slip_command_threshold = 0.1  # main：命令平移模长加偏航绝对值超过阈值时启用。
         contact_force_threshold = 1.0
@@ -267,12 +269,21 @@ class Go2ReferenceCfg(BaseConfig):
         feet_air_time_threshold = 0.5
         contact_time_variance_clip = 0.5
 
+        class posture:
+            walking_threshold = 0.1
+            running_threshold = 1.5
+            std_standing = {"hip": 0.05, "thigh": 0.1, "calf": 0.15}
+            std_walking = {"hip": 0.15, "thigh": 0.35, "calf": 0.5}
+            std_running = {"hip": 0.15, "thigh": 0.35, "calf": 0.5}
+
         class scales:
             track_lin_vel_xy_exp = 1.5
             track_ang_vel_z_exp = 1.0
             lin_vel_z_l2 = -1.0
             ang_vel_xy_l2 = -0.05
-            stand_still = -1.0
+            stuck = -1.0
+            stand_still = -2.0  # main：站立关节偏差平方和，保留当前分量门控。
+            pose = 0.3
             stand_still_joint_vel_l2 = -0.1
             foot_slip = -0.1
             joint_hip_deviation_l2 = -0.2

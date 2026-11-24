@@ -1,15 +1,47 @@
 # Copyright (c) 2026-2027 zh
-"""内容：复用PROOF普通地形奖励与main的站立关节速度、足端滑移项，返回奖励率。"""
+"""内容：复用PROOF普通地形奖励及main站立平方项、pose、站立关节速度和足端滑移项。"""
 
 import torch
 
 from .reference_state import (
     ANGULAR_BODY, CALF_CONTACT_EVENT, COMPUTED_TORQUE, CONTACT_FOUND, FOOT_HISTORY_CONTACT,
     FOOT_VELOCITY_XY, JOINT_ACCELERATION, JOINT_OFFSET, JOINT_TORQUE, JOINT_VELOCITY, STUMBLE_EVENT,
+    normalized_gravity,
 )
 from .state_spec import (
     ELAPSED_TIME, FIRST_CONTACT, LAST_AIR_TIME, LAST_CONTACT_TIME, PREVIOUS_ACTION, PREVIOUS_PREVIOUS_ACTION,
 )
+
+
+def posture_reward(task, state, next_state):
+    """复用main的分段关节容差及body平移／world偏航跟踪门控。"""
+    cfg = task.cfg.reward
+    magnitude = state.command[:, :2].norm(dim=-1) + state.command[:, 2].abs()
+    standing = magnitude < cfg.posture.walking_threshold
+    walking = (magnitude >= cfg.posture.walking_threshold) & (magnitude < cfg.posture.running_threshold)
+    std = (task.posture_std[0] * standing[:, None] + task.posture_std[1] * walking[:, None]
+           + task.posture_std[2] * (magnitude >= cfg.posture.running_threshold)[:, None])
+    pose = torch.exp(-(next_state.physical[:, JOINT_OFFSET].square() / std.square()).mean(-1))
+    if cfg.pose_tracking_gate:
+        linear_velocity = task.body_linear_velocity(next_state)[:, :2]
+        yaw_rate = -(normalized_gravity(next_state.physical) * next_state.physical[:, ANGULAR_BODY]).sum(-1)
+        linear_target = state.command[:, :2].square().sum(-1)
+        angular_target = state.command[:, 2].square()
+        linear_error = (linear_velocity - state.command[:, :2]).square().sum(-1)
+        angular_error = (yaw_rate - state.command[:, 2]).square()
+        linear_active = state.command[:, :2].norm(dim=-1) > cfg.stand_still_command_threshold
+        angular_active = state.command[:, 2].abs() > cfg.stand_still_command_threshold
+        # main的未选中分支仍求值；零目标分母用1，保留原门控定义。
+        linear_denominator = torch.where(linear_active, linear_target, torch.ones_like(linear_target))
+        angular_denominator = torch.where(angular_active, angular_target, torch.ones_like(angular_target))
+        linear_gate = torch.where(linear_active, (1 - linear_error / linear_denominator).clamp(0, 1),
+                                  torch.exp(-linear_error / cfg.tracking_linear_variance))
+        angular_gate = torch.where(angular_active, (1 - angular_error / angular_denominator).clamp(0, 1),
+                                   torch.exp(-angular_error / cfg.tracking_angular_variance))
+        gate = torch.where(magnitude <= cfg.stand_still_command_threshold, torch.ones_like(linear_gate),
+                           linear_gate * angular_gate)
+        pose = pose * gate
+    return pose
 
 
 def reference_reward_terms(task, state, action, next_state, failure):
@@ -47,7 +79,10 @@ def reference_reward_terms(task, state, action, next_state, failure):
                                         / cfg.tracking_angular_variance),
         "lin_vel_z_l2": body_velocity[:, 2].square(),
         "ang_vel_xy_l2": angular_velocity[:, :2].square().sum(-1),
-        "stand_still": joint_offset.norm(dim=-1) * ~moving,
+        "stuck": ((state.command[:, :2].norm(dim=-1) > cfg.stuck_velocity_threshold)
+                  & (body_velocity[:, :2].norm(dim=-1) < cfg.stuck_velocity_threshold)).float(),
+        "stand_still": joint_offset.square().sum(-1) * ~moving,
+        "pose": posture_reward(task, state, next_state),
         "stand_still_joint_vel_l2": physical[:, JOINT_VELOCITY].square().sum(-1) * standing,
         "foot_slip": (foot_speed_squared * physical[:, CONTACT_FOUND]).sum(-1)
                      * (command_magnitude > cfg.foot_slip_command_threshold),

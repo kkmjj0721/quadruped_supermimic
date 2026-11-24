@@ -221,8 +221,7 @@ class SuperMimicRunner:
         populated = self.archive.size > 0
         fallback = self.replay.sample_windows(archived, cfg.wm_window, device_indices=device_indices) if archived else None
         candidates = self.replay.sample_windows(4 * max(prioritized, 1), cfg.wm_window, device_indices=device_indices)
-        scores = self.task.replay_priority(candidates)
-        worthy = self.task.archive_worthy(candidates)
+        scores, worthy = self.task.replay_selection(candidates)
         keep = worthy & (torch.rand_like(scores) < cfg.archive_keep_prob)
         self.archive.add(candidates, keep)
         chosen = (scores + 1e-3 * torch.rand_like(scores)).topk(prioritized).indices

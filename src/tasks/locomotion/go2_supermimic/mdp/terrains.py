@@ -18,9 +18,11 @@ import numpy as np
 import torch
 from mjlab.terrains import TerrainEntityCfg, TerrainGeneratorCfg
 
+from .stepping_stones import SteppingStonesTerrainCfg
+
 
 def reference_generator(cfg) -> TerrainGeneratorCfg:
-    """复用ri_5036_him地形，追加PROOF普通地形阶段的正反金字塔斜坡。"""
+    """复用ri_5036_him地形，追加普通地形阶段的正反斜坡与梅花桩。"""
     from mjlab.terrains import BoxRandomGridTerrainCfg
     from mjlab.terrains.config import ROUGH_TERRAINS_CFG
 
@@ -53,6 +55,13 @@ def reference_generator(cfg) -> TerrainGeneratorCfg:
             slopes[name], slope_range=(0.0, 0.45), platform_width=platform_width,
             border_width=0.10, proportion=0.10,
         )
+    # 末尾追加以保留旧地块随机流；归一化后梅花桩占10%，原地形相对比例不变。
+    terrain.sub_terrains["stepping_stones"] = SteppingStonesTerrainCfg(
+        proportion=sum(term.proportion for term in terrain.sub_terrains.values()) / 9,
+        stone_size_range=(0.15, 0.30), stone_distance_range=(0.10, 0.25),
+        stone_height=0.10, stone_height_variation=0.02, stone_size_variation=0.0,
+        displacement_range=0.0, floor_depth=0.50, platform_width=2.5, border_width=0.0,
+    )
     return terrain
 
 
@@ -71,7 +80,7 @@ def clean_look(terrain):
 
 
 class TerrainMap:
-    """十二种普通地形各占一列，六行按生成器difficulty递增。"""
+    """十三种一阶段地形各占一列，六行按生成器difficulty递增。"""
 
     def __init__(self, cfg):
         self.cfg = deepcopy(cfg)

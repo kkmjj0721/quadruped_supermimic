@@ -74,9 +74,10 @@ def load_playback_source(task_id: str, checkpoint_file: str | Path) -> PlaybackS
 
 
 def build_playback_policy(source: PlaybackSource, adapter) -> torch.nn.Module:
-    """用原训练语义验证权重，同时允许单环境、无噪声和固定课程播放。"""
+    """用原训练语义验证权重，播放允许单环境、无噪声、固定课程并始终启用高程。"""
     expected, actual = source.cfg.to_dict(), adapter.cfg.to_dict()
-    for section, name in (("env", "num_envs"), ("noise", "add_noise"), ("terrain", "curriculum")):
+    for section, name in (("env", "num_envs"), ("noise", "add_noise"), ("terrain", "curriculum"),
+                          ("teacher", "exteroceptive_dropout")):
         expected[section][name] = actual[section][name]
     expected["domain_randomization"]["enabled"] = actual["domain_randomization"]["enabled"]
     if json.dumps(expected, sort_keys=True) != json.dumps(actual, sort_keys=True):

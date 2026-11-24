@@ -28,7 +28,7 @@ uv run --no-sync python scripts/train.py Unitree-Go2-SuperMimic-Rough \
   --device cuda:0 --num-envs 64 --max-iterations 1000
 ```
 
-平地使用表中对应的 `Flat` 任务。当前 `Rough` 包含原有地形及正反金字塔斜坡，保持在普通地形阶段。环境数与训练轮数按资源和实验目标调整；至少使用 2 个并行环境，网络、续训与导出接口见 [算法与任务说明](agents/README.md)。
+平地使用表中对应的 `Flat` 任务。当前 `Rough` 包含原有地形、正反金字塔斜坡及梅花桩，保持在普通地形阶段。环境数与训练轮数按资源和实验目标调整；至少使用 2 个并行环境，网络、续训与导出接口见 [算法与任务说明](agents/README.md)。
 
 默认产物目录：
 

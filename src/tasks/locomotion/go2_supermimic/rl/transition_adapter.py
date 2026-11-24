@@ -71,8 +71,9 @@ class Go2TransitionAdapter:
                 episode_length_s=self.cfg.env.episode_length_s, device=self.device)
             if not self.map.plane:
                 self.terrain_curriculum.family_ids.copy_(terrain.terrain_types)
-            # 源mask名单没有flat；其余保留地形分别对应discrete、stairs、slope。
-            self.mask_eligible = torch.tensor([name != "flat" for name in self.map.family_names], device=self.device)
+            # 平地沿用源名单例外；梅花桩按任务要求始终开启高程输入。
+            self.mask_eligible = torch.tensor(
+                [name not in ("flat", "stepping_stones") for name in self.map.family_names], device=self.device)
             self.terrain_half_size = torch.tensor(
                 (self.map.rows * self.map.size[0] / 2 + 4., self.map.cols * self.map.size[1] / 2 + 4.), device=self.device)
             self.context_version = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)

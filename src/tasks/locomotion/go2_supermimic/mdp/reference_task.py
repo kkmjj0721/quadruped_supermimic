@@ -27,7 +27,7 @@ from .state_spec import (
     AIR_TIME, COMMAND_OVERRIDE, COMMAND_TIMER, CONTACT, CONTACT_TIME, CONTEXT_DIM,
     CONTEXT_ENCODER_BIAS, CONTEXT_EXTEROCEPTIVE_MASK, ELAPSED_TIME, FIRST_CONTACT,
     FOOT_NAMES, FORWARD, HEADING_TARGET, LAST_AIR_TIME, LAST_CONTACT_TIME,
-    MEMORY_DIM, PREVIOUS_ACTION, PREVIOUS_PREVIOUS_ACTION, STANDING,
+    JOINT_NAMES, MEMORY_DIM, PREVIOUS_ACTION, PREVIOUS_PREVIOUS_ACTION, STANDING,
 )
 
 
@@ -46,6 +46,9 @@ class Go2ReferenceTaskModel:
         self.root_quat = slice(PHYSICAL_DIM, PHYSICAL_DIM + 4)
         self.default_joint_pos = default_joint_pos.to(device=self.device, dtype=torch.float32).clone()
         self.joint_limits = joint_limits.to(device=self.device, dtype=torch.float32).clone()
+        self.posture_std = self.default_joint_pos.new_tensor(
+            [[values[joint.split("_")[1]] for joint in JOINT_NAMES]
+             for values in (cfg.reward.posture.std_standing, cfg.reward.posture.std_walking, cfg.reward.posture.std_running)])
         self.reward_scales = cfg.to_dict()["reward"]["scales"]
         self.dynamics = ResidualDynamics(self.dt, cfg.control.decimation)
         self.kinematics = Go2Kinematics(device=self.device)
@@ -351,8 +354,8 @@ class Go2ReferenceTaskModel:
         base_contact = state.physical[:, BASE_CONTACT_FORCE].squeeze(-1) > self.cfg.reward.base_contact_threshold
         return torch.where(base_contact, torch.ones_like(orientation), orientation)
 
-    def _replay_events(self, window):
-        """严格沿用参考按state基准高度估计的稀有事件，不添加地形修正。"""
+    def replay_selection(self, window) -> tuple[Tensor, Tensor]:
+        """按state基准高度一次计算优先分数及归档资格，保留来源事件定义。"""
         physical = torch.cat((window.initial.physical[:, None], window.targets.physical), 1)
         batch, length = physical.shape[:2]
         flat = physical.flatten(0, 1)
@@ -363,14 +366,6 @@ class Go2ReferenceTaskModel:
         changes = (contact[:, 1:] != contact[:, :-1]).sum(-1)
         hard_motion = physical[..., VELOCITY_HEADING][..., 2].abs() > .6
         falls = ~window.valid[:, -1]
-        return changes, flight, hard_motion, falls
-
-    def replay_priority(self, window) -> Tensor:
-        """严格按来源计算接触切换、飞行和窗口提前结束的分数。"""
-        changes, flight, _, falls = self._replay_events(window)
-        return changes.sum(-1).float() + flight.sum(-1).float() + 4.0 * falls.float()
-
-    def archive_worthy(self, window) -> Tensor:
-        """归档至少两帧飞行、明显垂向运动或真实跌倒。"""
-        _, flight, hard_motion, falls = self._replay_events(window)
-        return (flight.sum(-1) >= 2) | hard_motion.any(-1) | falls
+        scores = changes.sum(-1).float() + flight.sum(-1).float() + 4.0 * falls.float()
+        worthy = (flight.sum(-1) >= 2) | hard_motion.any(-1) | falls
+        return scores, worthy
