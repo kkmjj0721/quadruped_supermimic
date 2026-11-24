@@ -23,15 +23,11 @@ class Go2WorldModel(WorldModel):
             [3e-3] * 3 + [5e-3] * 3 + [2e-2] * 3 + [5e-2] * 3 + [3e-3] * 12 + [5e-2] * 12))
 
     @torch.no_grad()
-    def prepare_statistics(self, state, action, target, mask=None):
-        return (*super().prepare_statistics(state, action, target, mask),
-                self.increment_norm.prepare_update(self.task.model_increment(state, target), mask))
-
-    @torch.no_grad()
-    def apply_statistics(self, statistics):
-        super().apply_statistics(statistics)
-        self.increment_norm.apply_update(statistics[2])
-        active = statistics[1].count > 0
+    def update_stats(self, state, action, target, mask=None):
+        super().update_stats(state, action, target, mask)
+        self.increment_norm.update(self.task.model_increment(state, target), mask)
+        count = self.output_norm.count.new_full((), state.physical.shape[0]) if mask is None else mask.sum()
+        active = count > 0
         for norm in (self.output_norm, self.increment_norm):
             for region in (MODEL_CONTACT, MODEL_HISTORY_CONTACT, MODEL_EVENTS):
                 mean, variance = norm.mean[region], norm.var[region]

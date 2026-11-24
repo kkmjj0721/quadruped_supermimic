@@ -10,7 +10,7 @@ import gc
 import torch
 
 from .buffer import Seed
-from .learner import Learner, _step_if_finite, clip_gradients, frozen
+from .learner import Learner, clip_gradients, frozen
 from .optim import MuonAdam
 
 
@@ -42,11 +42,7 @@ def _clone_inputs(value):
 @torch.no_grad()
 def _copy_inputs(target, source):
     """只更新已捕获输入的值，不改变图使用的内存地址。"""
-    if type(target) is not type(source):
-        raise ValueError("CUDA-graph input structure changed")
     if isinstance(target, torch.Tensor):
-        if target.shape != source.shape or target.dtype != source.dtype or target.device != source.device:
-            raise ValueError("CUDA-graph input shape, dtype or device changed")
         target.copy_(source)
     elif is_dataclass(target):
         for field in fields(target):
@@ -61,8 +57,6 @@ class CapturedUpdate:
 
     def __init__(self, function, device: torch.device, *, warmup: int = 3):
         self.function, self.device, self.warmup = function, torch.device(device), warmup
-        if self.device.type != "cuda":
-            raise ValueError("CUDA-graph updates require a CUDA device")
         self.calls = self.replays = 0
         self.graph = self.inputs = self.outputs = None
         self.stream = torch.cuda.Stream(device=self.device)
@@ -95,12 +89,6 @@ class CapturedUpdate:
             return self.outputs
 
 
-def _capturable_adam(parameters, rate, *, betas=(0.9, 0.999)):
-    parameters = list(parameters)
-    return torch.optim.Adam(parameters, lr=torch.tensor(float(rate), device=parameters[0].device),
-                            betas=betas, fused=True, capturable=True)
-
-
 # ---------- 可捕获更新 ----------
 
 class CudaGraphLearner(Learner):
@@ -108,10 +96,6 @@ class CudaGraphLearner(Learner):
 
     def __init__(self, task, actor, model, critic, config, execution=None):
         self.device = next(model.parameters()).device
-        if self.device.type != "cuda":
-            raise ValueError("CUDA-graph updates require a CUDA device")
-        if execution is not None and not execution.fused_adam:
-            raise ValueError("CUDA-graph updates require fused Adam")
         self._actor_updates = {}
         self._critic_update = None
         super().__init__(task, actor, model, critic, config, execution)
@@ -139,8 +123,6 @@ class CudaGraphLearner(Learner):
         if isinstance(optimizer, MuonAdam):
             optimizer.load_state_dict(data)
         else:
-            if "muon" in data:
-                raise ValueError("Cannot load MuonAdam state into Adam; use matching optimizer configuration")
             references = [group["lr"] for group in optimizer.param_groups]
             state = {**data, "param_groups": [{**group, "fused": True, "capturable": True}
                                               for group in data["param_groups"]]}
@@ -158,24 +140,20 @@ class CudaGraphLearner(Learner):
         loss = self.model.loss(window)
         loss.backward()
         gradient = clip_gradients(self.model.parameters(), self.config.grad_clip)
-        finite = torch.isfinite(gradient)
-        _step_if_finite(self.model_optimizer, finite)
-        return loss.detach(), gradient.detach(), window.valid.sum(), finite
+        self.model_optimizer.step()
+        return loss.detach(), gradient.detach(), window.valid.sum()
 
     def fit_model(self, window):
-        loss, gradient, valid, finite = self._model_update(window)
-        self.model_updates.add_(finite)
-        self.nonfinite_steps.add_(~finite)
+        loss, gradient, valid = self._model_update(window)
+        self.model_updates.add_(1)
         return {"wm_loss": loss.clone(), "wm_grad_norm": gradient.clone(),
-                "wm_valid_steps": valid.clone(), "wm_skipped": (~finite).float(),
+                "wm_valid_steps": valid.clone(),
                 "cuda_graph/model_captured": float(self._model_update.graph is not None),
                 "cuda_graph/model_replays": self._model_update.replays}
 
     def _actor_core(self, seed, *, freeze_actor):
         cfg, batch = self.config, seed.history.shape[0]
         self.actor_optimizer.zero_grad(set_to_none=True)
-        self.model_optimizer.zero_grad(set_to_none=True)
-        self.critic_optimizer.zero_grad(set_to_none=True)
         feature_batches, target_batches, metrics = [], [], {}
         velocity_mse_axes = seed.history.new_zeros(3)
         with frozen(self.model, self.critic):
@@ -207,21 +185,17 @@ class CudaGraphLearner(Learner):
             for axis, value in zip(("x", "y", "z"), velocity_mse_axes.sqrt()):
                 metrics[f"velocity_rmse_{axis}"] = value
             gradient = clip_gradients(self.actor.policy_parameters(), cfg.grad_clip, cfg.grad_clip_element)
-            finite = torch.isfinite(gradient) & torch.isfinite(metrics["actor_loss"])
             if not freeze_actor:
-                _step_if_finite(self.actor_optimizer, finite)
+                self.actor_optimizer.step()
         metrics["control_grad_norm"] = gradient.detach()
-        return metrics, torch.cat(feature_batches), torch.cat(target_batches), finite
+        return metrics, torch.cat(feature_batches), torch.cat(target_batches)
 
     def _critic_core(self, features, targets):
         cfg, optimizer = self.config, self.critic_optimizer
-        # 每次真实critic更新仅提交一次统计；断言与提交随图重放，主机不再等待actor结果。
-        statistics = self.critic.normalizer.prepare_update(features)
-        torch._assert_async(statistics.finite, "Normalization data contains non-finite values")
-        self.critic.normalizer.apply_update(statistics._replace(
-            count=torch.where(statistics.finite, statistics.count, 0)))
+        # 每次真实critic更新仅累计一次统计，随图重放直接提交。
+        self.critic.normalizer.update(features)
         minibatch = features.shape[0] // cfg.critic_minibatches
-        losses, flags = [], []
+        losses = []
         for _ in range(cfg.critic_epochs):
             indices = torch.randperm(features.shape[0], device=features.device)
             for index in range(cfg.critic_minibatches):
@@ -234,12 +208,10 @@ class CudaGraphLearner(Learner):
                     weighted_loss.backward()
                     value_loss += weighted_loss.detach()
                     del partial_loss, weighted_loss
-                gradient = clip_gradients(self.critic.parameters(), cfg.grad_clip)
-                finite = torch.isfinite(gradient) & statistics.finite
-                _step_if_finite(optimizer, finite)
+                clip_gradients(self.critic.parameters(), cfg.grad_clip)
+                optimizer.step()
                 losses.append(value_loss)
-                flags.append(finite)
-        return torch.stack(losses).mean(), torch.stack(flags).sum()
+        return torch.stack(losses).mean()
 
     def timing_setup_pending(self, *, control_enabled=False, freeze_actor=False):
         """按本轮实际使用的图判断是否仍有预热／捕获，查询不创建或重放图。"""
@@ -253,35 +225,28 @@ class CudaGraphLearner(Learner):
 
     def improve(self, seed, *, freeze_actor=False, timing=None):
         batch = seed.history.shape[0]
-        if batch < 1:
-            raise ValueError("Imagination seed batch must be nonempty")
         if freeze_actor not in self._actor_updates:
             self._actor_updates[freeze_actor] = CapturedUpdate(
                 lambda value: self._actor_core(value, freeze_actor=freeze_actor), self.device)
         actor_update = self._actor_updates[freeze_actor]
         with timing.section("actor_update") if timing is not None else nullcontext():
-            metrics, features, targets, finite = actor_update(seed)
-            self.nonfinite_steps.add_(~finite)
+            metrics, features, targets = actor_update(seed)
             if not freeze_actor:
-                self.actor_updates.add_(finite)
+                self.actor_updates.add_(1)
         with timing.section("critic_prepare") if timing is not None else nullcontext():
-            # 这里只处理静态形状和图对象；归一化及有限性断言在critic图中先于优化执行。
+            # 这里只处理静态形状和图对象；归一化在critic图中先于优化执行。
             minibatch = features.shape[0] // self.config.critic_minibatches
-            if minibatch == 0:
-                raise ValueError("Imagined transitions must fill at least one row per critic minibatch")
             if self._critic_update is None:
                 self._critic_update = CapturedUpdate(self._critic_core, self.device)
         with timing.section("critic_update") if timing is not None else nullcontext():
-            value_loss, count = self._critic_update(features, targets)
-        skipped = self.config.critic_epochs * self.config.critic_minibatches - count
-        self.critic_updates.add_(count)
+            value_loss = self._critic_update(features, targets)
+        self.critic_updates.add_(self.config.critic_epochs * self.config.critic_minibatches)
         result = {name: value.clone() for name, value in metrics.items()}
-        result.update({"critic_loss": value_loss.clone(), "control_skipped": (~finite).float(),
-                       "critic_skipped": skipped, "control_learning_rate": self.actor_optimizer.param_groups[0]["lr"].clone(),
+        result.update({"critic_loss": value_loss.clone(),
+                       "control_learning_rate": self.actor_optimizer.param_groups[0]["lr"].clone(),
                        "execution/imag_batch": batch,
                        "execution/imag_microbatch": min(batch, self.execution.imag_microbatch),
                        "execution/critic_microbatch": min(self.execution.critic_microbatch, minibatch),
-                       "nonfinite_steps": self.nonfinite_steps.clone(),
                        "cuda_graph/actor_captured": float(actor_update.graph is not None),
                        "cuda_graph/actor_replays": actor_update.replays,
                        "cuda_graph/critic_captured": float(self._critic_update.graph is not None),

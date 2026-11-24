@@ -90,10 +90,6 @@ class ProofTeacherActor(nn.Module):
         self.actor = Mlp([self.actor_input_dim, *config.actor_hidden, self.action_dim])
         self.actor.initialize_head()
 
-    def policy_normalizers(self):
-        """导出与播放校验需要检查的归一化模块。"""
-        return (self.normalizer,)
-
     def policy_parameters(self):
         """想象目标与真实速度监督共同更新完整教师策略。"""
         return self.parameters()
@@ -104,18 +100,8 @@ class ProofTeacherActor(nn.Module):
         return torch.cat([term.flatten(1) for term in framed.split(self.observation_term_dims, dim=-1)], dim=-1)
 
     @torch.no_grad()
-    def prepare_statistics(self, history: Tensor):
-        """仅更新本体历史统计，高程与mask不作输入归一化。"""
-        return (self.normalizer.prepare_update(self.flatten_history(history)),)
-
-    @torch.no_grad()
-    def apply_statistics(self, statistics):
-        """提交本控制步已经统一校验的本体历史统计。"""
-        self.normalizer.apply_update(statistics[0])
-
-    @torch.no_grad()
     def update_statistics(self, history: Tensor):
-        """独立入口即时校验；采集热路径通过准备／提交合并检查。"""
+        """仅更新本体历史统计，高程与mask不作输入归一化。"""
         self.normalizer.update(self.flatten_history(history))
 
     @torch.jit.export

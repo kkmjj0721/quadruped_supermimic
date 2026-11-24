@@ -37,27 +37,13 @@ def clip_gradients(parameters, norm: float, element: float | None = None):
     return value
 
 
-def _step_if_finite(optimizer, finite):
-    """按优化器执行模式跳过非有限更新，组合优化器同时保护两套状态。"""
-    if isinstance(optimizer, MuonAdam):
-        optimizer.step(ok=finite)
-    elif optimizer.param_groups[0]["fused"]:
-        optimizer.found_inf = (~finite).float()
-        try:
-            optimizer.step()
-        finally:
-            optimizer.found_inf = None
-    elif bool(finite):
-        optimizer.step()
-
-
 class Learner:
-    _counter_names = ("actor_updates", "model_updates", "critic_updates", "nonfinite_steps")
+    _counter_names = ("actor_updates", "model_updates", "critic_updates")
 
     def __init__(self, task, actor, model, critic, config, execution=None):
         self.task, self.actor, self.model, self.critic, self.config = task, actor, model, critic, config
         self.execution = replace(execution) if execution is not None else ExecutionConfig()
-        self._device_counts = torch.zeros(4, dtype=torch.int64, device=next(model.parameters()).device)
+        self._device_counts = torch.zeros(3, dtype=torch.int64, device=next(model.parameters()).device)
         self.reset_policy_optimizers()
         self.model_optimizer = self._make_optimizer("model")
         self.imagination = Imagination(task, actor, model, critic, config)
@@ -66,7 +52,6 @@ class Learner:
         self.actor_updates = 0
         self.model_updates = 0
         self.critic_updates = 0
-        self.nonfinite_steps = 0
         self.lr_multiplier = 1.0
         self.ramp_start = 0
         self.actor_frozen_until = 0
@@ -96,14 +81,6 @@ class Learner:
     @critic_updates.setter
     def critic_updates(self, value):
         self._device_counts[2].copy_(torch.as_tensor(value, device=self._device_counts.device))
-
-    @property
-    def nonfinite_steps(self):
-        return self._device_counts[3]
-
-    @nonfinite_steps.setter
-    def nonfinite_steps(self, value):
-        self._device_counts[3].copy_(torch.as_tensor(value, device=self._device_counts.device))
 
     def _make_optimizer(self, name, *, capturable=False):
         """按网络职责选择PartyMimic分组；critic始终使用Adam。"""
@@ -144,12 +121,10 @@ class Learner:
         loss = self.model.loss(window)
         loss.backward()
         gradient = clip_gradients(self.model.parameters(), self.config.grad_clip)
-        finite = torch.isfinite(gradient)
-        _step_if_finite(self.model_optimizer, finite)
-        self.model_updates.add_(finite)
-        self.nonfinite_steps.add_(~finite)
+        self.model_optimizer.step()
+        self.model_updates.add_(1)
         return {"wm_loss": loss.detach(), "wm_grad_norm": gradient.detach(),
-                "wm_valid_steps": window.valid.sum(), "wm_skipped": (~finite).float()}
+                "wm_valid_steps": window.valid.sum()}
 
     def _critic_loss(self, features, targets):
         return (self.critic(features) - targets).square().mean()
@@ -164,10 +139,8 @@ class Learner:
         critic, optimizer = self.critic, self.critic_optimizer
         with timing.section("critic_prepare") if timing is not None else nullcontext():
             critic.normalizer.update(features)
-            losses, flags = [], []
+            losses = []
             minibatch = features.shape[0] // cfg.critic_minibatches
-            if minibatch == 0:
-                raise ValueError("Imagined transitions must fill at least one row per critic minibatch")
         with timing.section("critic_update") if timing is not None else nullcontext():
             for _ in range(cfg.critic_epochs):
                 indices = torch.randperm(features.shape[0], device=features.device)
@@ -182,25 +155,16 @@ class Learner:
                         weighted_loss.backward()
                         value_loss += weighted_loss.detach()
                         del partial_loss, weighted_loss
-                    gradient = clip_gradients(critic.parameters(), cfg.grad_clip)
-                    finite = torch.isfinite(gradient)
-                    _step_if_finite(optimizer, finite)
-                    flags.append(finite)
+                    clip_gradients(critic.parameters(), cfg.grad_clip)
+                    optimizer.step()
                     losses.append(value_loss)
-            updates = torch.stack(flags).sum()
-            skipped = cfg.critic_epochs * cfg.critic_minibatches - updates
-            value_loss = torch.stack(losses).mean()
-        return value_loss, skipped, updates, minibatch
+        return torch.stack(losses).mean(), cfg.critic_epochs * cfg.critic_minibatches, minibatch
 
     def improve(self, seed, *, freeze_actor=False, timing=None):
         cfg = self.config
         batch = seed.history.shape[0]
-        if batch < 1:
-            raise ValueError("Imagination seed batch must be nonempty")
         with timing.section("actor_update") if timing is not None else nullcontext():
             self.actor_optimizer.zero_grad(set_to_none=True)
-            self.model_optimizer.zero_grad(set_to_none=True)
-            self.critic_optimizer.zero_grad(set_to_none=True)
             feature_batches, target_batches = [], []
             metrics = {}
             velocity_mse_axes = seed.history.new_zeros(3)
@@ -235,24 +199,20 @@ class Learner:
                     metrics[f"velocity_rmse_{axis}"] = value
                 parameters = self.actor.policy_parameters()
                 gradient = clip_gradients(parameters, cfg.grad_clip, cfg.grad_clip_element)
-                finite = torch.isfinite(gradient) & torch.isfinite(metrics["actor_loss"])
-                self.nonfinite_steps.add_(~finite)
                 if not freeze_actor:
-                    _step_if_finite(self.actor_optimizer, finite)
-                    self.actor_updates.add_(finite)
+                    self.actor_optimizer.step()
+                    self.actor_updates.add_(1)
             features = torch.cat(feature_batches)
             targets = torch.cat(target_batches)
             del feature_batches, target_batches
-        value_loss, skipped, updates, minibatch = (self._fit_critic(features, targets) if timing is None else
-                                                 self._fit_critic(features, targets, timing=timing))
+        value_loss, updates, minibatch = (self._fit_critic(features, targets) if timing is None else
+                                         self._fit_critic(features, targets, timing=timing))
         self.critic_updates.add_(updates)
         metrics.update({"control_grad_norm": gradient.detach(), "critic_loss": value_loss,
-                        "control_skipped": (~finite).float(), "critic_skipped": skipped,
                         "control_learning_rate": self.actor_optimizer.param_groups[0]["lr"],
                         "execution/imag_batch": batch,
                         "execution/imag_microbatch": min(batch, self.execution.imag_microbatch),
                         "execution/critic_microbatch": min(self.execution.critic_microbatch, minibatch)})
-        metrics["nonfinite_steps"] = self.nonfinite_steps.clone()
         return metrics
 
     def state_dict(self):
@@ -267,8 +227,6 @@ class Learner:
         if isinstance(optimizer, MuonAdam):
             optimizer.load_state_dict(data)
             return
-        if "muon" in data:
-            raise ValueError("Cannot load MuonAdam state into Adam; use matching optimizer configuration")
         # 必须在加载前覆盖：PyTorch据此把fused Adam的step张量放到参数设备。
         fused = True if self.execution.fused_adam else None
         state = {**data, "param_groups": [{**group, "fused": fused, "capturable": False,

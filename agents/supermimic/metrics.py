@@ -1,8 +1,7 @@
 # Copyright (c) 2026-2027 zh
-"""内容：在设备上累计有限指标，并在日志边界集中读取标量与有效掩码。"""
+"""内容：在设备上累计指标，并在日志边界集中读取标量与有效掩码。"""
 
 from functools import lru_cache
-import math
 
 import torch
 
@@ -57,22 +56,16 @@ class EpisodeWindow:
         return metrics, {name: populated for name in metrics}
 
 
-def _accumulate_model_metrics(values, totals, validity):
-    """固定指标元组内融合逐更新过滤与累计，沿用每个输入的数值类型。"""
-    updated, valid = [], []
-    for value, total, accepted in zip(values, totals, validity):
-        finite = torch.isfinite(value).all()
-        updated.append(total + torch.where(finite, value, 0))
-        valid.append(accepted | finite)
-    return tuple(updated), tuple(valid)
+def _accumulate_model_metrics(values, totals):
+    """固定指标元组内融合累计，沿用每个输入的数值类型。"""
+    return tuple(total + value for value, total in zip(values, totals))
 
 
 class ModelMetrics:
-    """保留逐更新过滤、总更新次数分母及全无效缺省，可编译设备累计核心。"""
+    """按总更新次数求均值，可编译设备累计核心。"""
 
     def __init__(self, *, compile_backend=None):
         self.totals = {}
-        self.valid = {}
         self._accumulate = (_accumulate_model_metrics if compile_backend is None
                             else _compiled_accumulator(_accumulate_model_metrics, compile_backend))
 
@@ -83,23 +76,19 @@ class ModelMetrics:
             if isinstance(value, torch.Tensor):
                 device_values[name] = value.detach()
                 if name not in self.totals:
-                    # 与原来的0+where(finite,value,0)保持推广一致，包括bool到int64。
+                    # 保持0+value的类型推广，包括bool到int64。
                     self.totals[name] = torch.zeros_like(value, dtype=torch.result_type(value, 0))
-                    self.valid[name] = torch.zeros((), dtype=torch.bool, device=value.device)
             else:
-                finite = math.isfinite(value)
-                contribution = value if finite else 0
-                self.totals[name] = self.totals.get(name, 0) + contribution
-                self.valid[name] = self.valid.get(name, False) | finite
+                if name not in self.totals:
+                    self.totals[name] = 0
+                self.totals[name] += value
         if device_values:
             names = tuple(device_values)
-            totals, valid = self._accumulate(tuple(device_values.values()), tuple(self.totals[name] for name in names),
-                                             tuple(self.valid[name] for name in names))
+            totals = self._accumulate(tuple(device_values.values()), tuple(self.totals[name] for name in names))
             self.totals.update(zip(names, totals))
-            self.valid.update(zip(names, valid))
 
     def mean(self, updates):
-        return {name: value / updates for name, value in self.totals.items()}, self.valid
+        return {name: value / updates for name, value in self.totals.items()}
 
 
 def _metric_reduction(name):
@@ -107,8 +96,7 @@ def _metric_reduction(name):
     if name in {"failures", "timeouts", "reset_steps", "episode/completed", "real_steps_delta",
                 "collection/control_steps"} or name.endswith("_updates_delta"):
         return "sum"
-    if (name in {"iteration", "training_target_iteration", "real_steps", "nonfinite_steps",
-                 "control_enabled", "model_not_ready"}
+    if (name in {"iteration", "training_target_iteration", "real_steps", "control_enabled"}
             or name.endswith(("_total", "_learning_rate"))
             or name.startswith(("replay/", "episode/", "control/", "guard/"))):
         return "last"
@@ -117,14 +105,11 @@ def _metric_reduction(name):
     return "mean"
 
 
-def _accumulate_metric_columns(values, masks, totals, counts, bad, last, weighted, optional, steps):
+def _accumulate_metric_columns(values, masks, totals, counts, last, weighted, steps):
     """固定列布局内融合打包、有效性和累计；FP64输出避免整数先经FP32舍入。"""
     # 转换必须先于混合类型stack；只指定FP64输出时编译器可能先按FP32提升输入。
     values = torch.stack(tuple(value.to(torch.float64) for value in values))
     valid = torch.stack(masks)
-    finite = torch.isfinite(values)
-    valid = valid & (finite | ~optional)
-    bad.logical_or_(valid & ~finite & ~optional)
     weights = torch.where(weighted, steps, 1)
     accepted = torch.where(valid, values, 0)
     totals.copy_(torch.where(last, accepted, totals + accepted * weights))
@@ -135,7 +120,7 @@ class MetricWindow:
     """设备标量按列累计，主机已有标量留在主机；仅汇总边界由调用方回读。
 
     可选编译固定布局的打包与累计核心，主机字典和跨轮调度不进入图。
-    最近100回合等快照取末轮；缺省和可选非有限值不进入均值分母。
+    最近100回合等快照取末轮；缺省和空回合窗口不进入均值分母。
     同名指标在窗口中固定使用主机数值或同一设备张量，沿用训练循环的来源约定。
     """
 
@@ -144,12 +129,10 @@ class MetricWindow:
         self._names = []
         self._zeros = {}
         self._mask_defaults = {}
-        self._optional = set()
         self._accumulate = (_accumulate_metric_columns if compile_backend is None
                             else _compiled_accumulator(_accumulate_metric_columns, compile_backend))
         self._totals = torch.empty(0, dtype=torch.float64, device=self.device)
         self._counts = torch.empty_like(self._totals)
-        self._bad = torch.empty(0, dtype=torch.bool, device=self.device)
         self._steps = torch.ones(1, dtype=torch.float64, device=self.device)
         self._true = torch.ones((), dtype=torch.bool, device=self.device)
         self._false = torch.zeros((), dtype=torch.bool, device=self.device)
@@ -164,12 +147,10 @@ class MetricWindow:
         self._host = {}
         self._totals.zero_()
         self._counts.zero_()
-        self._bad.zero_()
 
     @torch.no_grad()
-    def add(self, metrics, *, optional=(), validity=None):
+    def add(self, metrics, *, validity=None):
         validity = validity if validity is not None else {}
-        optional = set(optional)
         self.iterations += 1
         iteration = metrics.get("iteration", self.iterations)
         if isinstance(iteration, torch.Tensor):
@@ -180,7 +161,7 @@ class MetricWindow:
         steps = metrics.get("collection/control_steps", 1)
         device_values = {}
         for name in list(self._host):
-            if name not in metrics and _metric_reduction(name) == "last" and math.isfinite(self._host[name][0]):
+            if name not in metrics and _metric_reduction(name) == "last":
                 del self._host[name]
         for name, value in metrics.items():
             if isinstance(value, torch.Tensor):
@@ -191,37 +172,30 @@ class MetricWindow:
             if isinstance(valid, torch.Tensor) or mode == "weighted" and isinstance(steps, torch.Tensor):
                 device_values[name] = torch.as_tensor(value, device=self.device).detach().reshape(())
                 continue
-            if name in optional:
-                valid = valid and math.isfinite(value)
             weight = steps if mode == "weighted" else 1
             if not valid:
-                if mode == "last" and math.isfinite(self._host.get(name, (0, 0))[0]):
+                if mode == "last":
                     self._host.pop(name, None)
                 continue
             previous, denominator = self._host.get(name, (0, 0))
             if mode == "last":
-                # 必须记录的非有限快照不能被后续合法值掩盖。
-                self._host[name] = (value if math.isfinite(previous) else previous, 1)
+                self._host[name] = (value, 1)
             else:
                 self._host[name] = (previous + value * weight, denominator + weight)
 
         new_names = [name for name in device_values if name not in self._zeros]
-        new_optional = self._optional | optional
-        if new_names or new_optional != self._optional:
+        if new_names:
             self._names.extend(new_names)
             self._zeros.update((name, torch.zeros_like(device_values[name])) for name in new_names)
             # 每列视图仅建立一次；对象独立以保持编译输入别名约定，底层标志只读共享。
             self._mask_defaults.update((name, (self._false.view(()), self._true.view(()))) for name in new_names)
-            self._optional = new_optional
             padding = self._totals.new_zeros(len(new_names))
             self._totals = torch.cat((self._totals, padding))
             self._counts = torch.cat((self._counts, padding))
-            self._bad = torch.cat((self._bad, padding.bool()))
             modes = [_metric_reduction(name) for name in self._names]
             self._last = torch.tensor([mode == "last" for mode in modes], device=self.device)
             self._mean = torch.tensor([mode in {"mean", "weighted"} for mode in modes], device=self.device)
             self._weighted = torch.tensor([mode == "weighted" for mode in modes], device=self.device)
-            self._filter = torch.tensor([name in self._optional for name in self._names], device=self.device)
         if not self._names:
             return
         values, masks = [], []
@@ -236,8 +210,8 @@ class MetricWindow:
             self._steps.copy_(steps)
         else:
             self._steps.fill_(steps)
-        self._accumulate(tuple(values), tuple(masks), self._totals, self._counts, self._bad,
-                         self._last, self._weighted, self._filter, self._steps)
+        self._accumulate(tuple(values), tuple(masks), self._totals, self._counts,
+                         self._last, self._weighted, self._steps)
 
     def aggregate(self):
         """返回汇总值及有效掩码，不同步设备；空窗口返回两个空映射。"""
@@ -249,8 +223,7 @@ class MetricWindow:
         if self._names:
             means = self._totals / self._counts.clamp_min(1)
             values = torch.where(self._mean, means, self._totals)
-            values = torch.where(self._bad, torch.nan, values)
-            valid = (self._counts > 0) | self._bad
+            valid = self._counts > 0
             metrics.update(zip(self._names, values.unbind()))
             validity.update(zip(self._names, valid.unbind()))
         metrics.update({"metrics/window_start_iteration": self.start_iteration,
@@ -259,8 +232,8 @@ class MetricWindow:
         return metrics, validity
 
 
-def read_metrics(metrics, device, *, optional=(), validity=None):
-    """一次回传张量；仅过滤学习器原本可省略的键，保留其他指标的异常。"""
+def read_metrics(metrics, device, *, validity=None):
+    """一次回传张量，仅按有效掩码排除空窗口指标。"""
     validity = validity if validity is not None else {}
     tensor_names = [name for name, value in metrics.items() if isinstance(value, torch.Tensor)]
     mask_names = list(validity)
@@ -272,7 +245,4 @@ def read_metrics(metrics, device, *, optional=(), validity=None):
     for name, valid in zip(mask_names, values[len(tensor_names):]):
         if not valid:
             result.pop(name, None)
-    for name in optional:
-        if name in result and not math.isfinite(result[name]):
-            del result[name]
     return result

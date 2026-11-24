@@ -15,22 +15,15 @@ from .policy import Mlp
 
 def _prepare_policy(actor, iteration, metadata):
     """冻结部署副本并生成两种导出入口共用的元数据。"""
-    if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
-        raise ValueError("Export iteration must be a nonnegative integer")
     if any(not torch.isfinite(value).all() for value in actor.state_dict().values()):
         raise ValueError("Cannot export non-finite policy tensors")
     runtime_precision = "bf16" if any(layer.use_bf16 for layer in actor.modules() if isinstance(layer, Mlp)) else "fp32"
     source_precision = (metadata or {}).get("source_network_precision", runtime_precision)
-    if source_precision not in ("fp32", "bf16"):
-        raise ValueError("Source network precision must be fp32 or bf16")
     module = deepcopy(actor).cpu().eval().requires_grad_(False)
     # 部署副本统一使用 FP32，训练策略的精度开关保持原值。
     for layer in module.modules():
         if isinstance(layer, Mlp):
             layer.use_bf16 = False
-    for normalizer in module.policy_normalizers():
-        if (normalizer.var < 0).any() or normalizer.count < 0:
-            raise ValueError("Invalid policy normalization statistics")
     encoder = {
         "type": "dual_mlp",
         "proprioception": {

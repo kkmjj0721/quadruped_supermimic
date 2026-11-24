@@ -7,8 +7,6 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
-from numbers import Real
 from pathlib import Path
 from datetime import timedelta
 
@@ -37,35 +35,9 @@ _SCALAR_GROUPS = {
 }
 
 
-def _positive_integer(name: str, value: int) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError(f"{name} must be a positive integer")
-
-
-def _numeric_metrics(metrics: Mapping[str, Real]) -> dict[str, int | float]:
-    """复制并验证可写入TensorBoard的有限数字，不修改调用方的映射。"""
-    if not isinstance(metrics, Mapping):
-        raise TypeError("Training metrics must be a flat mapping of string keys to finite numbers")
-    values = {}
-    for name, value in metrics.items():
-        if not isinstance(name, str):
-            raise TypeError("Training metric names must be strings")
-        if not isinstance(value, Real):
-            raise TypeError(f"Training metric {name!r} must be a finite number")
-        try:
-            finite = math.isfinite(value)
-        except (OverflowError, ValueError):
-            finite = False
-        if not finite:
-            raise ValueError(f"Training metric {name!r} must be finite")
-        values[name] = int(value) if isinstance(value, int) else float(value)
-    return values
-
-
-def format_training_log(metrics: Mapping[str, Real], *, num_envs: int, device) -> str:
+def format_training_log(metrics: dict[str, int | float], *, num_envs: int, device) -> str:
     """按Go2 HIM的80列单块样式显示训练摘要和实时奖励率。"""
-    _positive_integer("num_envs", num_envs)
-    values = _numeric_metrics(metrics)
+    values = metrics
 
     def number(key: str, *, decimals: int = 4, count: bool = False) -> str:
         if key not in values:
@@ -83,9 +55,7 @@ def format_training_log(metrics: Mapping[str, Real], *, num_envs: int, device) -
     iteration = number("iteration", count=True)
     target = number("training_target_iteration", count=True)
     progress = iteration if "training_target_iteration" not in values else f"{iteration}/{target}"
-    model_ready = not bool(values.get("model_not_ready", 0))
-    control_available = model_ready and values.get("control_enabled", 1) != 0
-    model_available = model_ready and values.get("wm_skipped", 0) < 1
+    control_available = metrics.get("control_enabled", 1) != 0
     learning_keys = ("timing/world_model_seconds", "timing/control_seconds")
     learning_time = f"{sum(values[key] for key in learning_keys):.3f}s" if all(key in values for key in learning_keys) else "n/a"
     collection_time = number("timing/collection_seconds", decimals=3)
@@ -95,12 +65,10 @@ def format_training_log(metrics: Mapping[str, Real], *, num_envs: int, device) -
              row("Total steps", number("real_steps", count=True)),
              row("Steps per second", number("performance/real_total_fps", count=True)),
              row("Collection time", collection_time), row("Learning time", learning_time)]
-    if not model_ready:
-        lines.append(row("Training phase", "replay warmup"))
-    elif values.get("control_enabled") == 0:
+    if values.get("control_enabled") == 0:
         lines.append(row("Training phase", "world-model only"))
     for label, key, available in (
-        ("Mean world model loss", "wm_loss", model_available),
+        ("Mean world model loss", "wm_loss", True),
         ("Mean value loss", "critic_loss", control_available),
         ("Mean control loss", "control_loss", control_available),
         ("Mean velocity estimation loss", "velocity_loss", control_available),
@@ -143,8 +111,6 @@ class TrainingLogger:
     """每次汇总写入TensorBoard，横轴为窗口末轮；终端另按迭代间隔显示。"""
 
     def __init__(self, log_dir: str | Path | None, *, num_envs: int, device, log_interval: int = 1):
-        _positive_integer("num_envs", num_envs)
-        _positive_integer("log_interval", log_interval)
         self.num_envs = num_envs
         self.device = str(device)
         self.log_interval = log_interval
@@ -163,8 +129,8 @@ class TrainingLogger:
         if self._writer is not None:
             self._writer.add_text(tag, text, 0)
 
-    def record(self, metrics: Mapping[str, Real], *, force: bool = False) -> None:
-        values = _numeric_metrics(metrics)
+    def record(self, metrics: dict[str, int | float], *, force: bool = False) -> None:
+        values = metrics
         self._records += 1
         iteration = values.get("iteration", self._records)
         if self._writer is not None:

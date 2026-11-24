@@ -53,10 +53,6 @@ class Replay:
     """
 
     def __init__(self, spec, num_envs: int, capacity: int, device, history_storage="full", *, device_sampling=False):
-        if capacity < 1:
-            raise ValueError("Replay capacity must be positive")
-        if history_storage not in ("full", "frames"):
-            raise ValueError("Replay history storage must be 'full' or 'frames'")
         self.spec, self.num_envs, self.capacity = spec, num_envs, capacity
         self.device = torch.device(device)
         self.history_storage = history_storage
@@ -123,8 +119,6 @@ class Replay:
         return self.size > horizon + 1
 
     def _sample_positions(self, batch, horizon, device_indices):
-        if device_indices and not self.device_sampling:
-            raise ValueError("Device indices require device_sampling=True")
         rows = torch.randint(self.num_envs, (batch,), device=self.device)
         if device_indices:
             # 上界随每次重放变化；FP64量化保持近似均匀分布，随机流不同于randint。
@@ -139,14 +133,10 @@ class Replay:
         return rows, absolute
 
     def _sample_indices(self, batch: int, horizon: int, *, device_indices=False):
-        if batch < 1 or horizon < 1 or not self.ready(horizon):
-            raise ValueError("Replay has insufficient state slots for sampling")
         rows, absolute = self._sample_positions(batch, horizon, device_indices)
         return rows, absolute % self.capacity
 
     def sample_seeds(self, batch: int, *, device_indices=False) -> Seed:
-        if batch < 1 or self.size == 0:
-            raise ValueError("Cannot sample an empty replay or nonpositive seed batch")
         rows, absolute = self._sample_positions(batch, 0, device_indices)
         slots = absolute % self.capacity
         if self.history_storage == "full":
@@ -172,13 +162,10 @@ class WindowArchive:
     """固定形状候选按掩码写入；环形计数留在设备，无效候选独占暂存槽。"""
 
     def __init__(self, capacity: int, device="cpu"):
-        if capacity < 0:
-            raise ValueError("Archive capacity must be nonnegative")
         self.capacity = capacity
         self.size = torch.zeros((), dtype=torch.long, device=device)
         self.clock = torch.zeros_like(self.size)
         self.storage = None
-        self._scratch_capacity = 0
 
     def clear(self):
         self.size.zero_()
@@ -188,25 +175,15 @@ class WindowArchive:
     def add(self, windows: Window, keep: Tensor | None = None):
         candidates = windows.actions.shape[0]
         device = windows.actions.device
-        if keep is not None and (keep.shape != (candidates,) or keep.dtype != torch.bool or keep.device != device):
-            raise ValueError("Archive mask must be boolean [B] on the window device")
         if candidates == 0 or self.capacity == 0:
             return
-        if self.storage is None or candidates > self._scratch_capacity:
-            # 首批候选即分配，不读取有效数量；仅候选静态形状增大时扩充暂存区。
+        if self.storage is None:
+            # 首批候选即分配，不读取有效数量；候选批次大小由调用方固定。
             def allocate(value):
                 return torch.zeros((self.capacity + candidates, *value.shape[1:]), dtype=value.dtype, device=device)
 
-            storage = Window(windows.initial.map(allocate), allocate(windows.actions), windows.targets.map(allocate),
-                             allocate(windows.valid), allocate(windows.terminated))
-            if self.storage is not None:
-                for name in ("initial", "targets"):
-                    for field in fields(TaskState):
-                        getattr(getattr(storage, name), field.name)[:self.capacity].copy_(
-                            getattr(getattr(self.storage, name), field.name)[:self.capacity])
-                for name in ("actions", "valid", "terminated"):
-                    getattr(storage, name)[:self.capacity].copy_(getattr(self.storage, name)[:self.capacity])
-            self.storage, self._scratch_capacity = storage, candidates
+            self.storage = Window(windows.initial.map(allocate), allocate(windows.actions), windows.targets.map(allocate),
+                                  allocate(windows.valid), allocate(windows.terminated))
             self.size, self.clock = self.size.to(device), self.clock.to(device)
         keep = torch.ones(candidates, dtype=torch.bool, device=device) if keep is None else keep
         rank = keep.long().cumsum(0) - 1
@@ -230,9 +207,6 @@ class WindowArchive:
         return self.storage.index(indices.clamp_max(bound - 1))
 
     def sample(self, batch: int) -> Window:
-        if self.storage is None or batch < 1:
-            raise ValueError("Cannot sample an empty rare-event archive")
-        torch._assert_async(self.size > 0, "Cannot sample an empty rare-event archive")
         return self._sample(batch)
 
     def sample_or(self, fallback: Window, populated: Tensor) -> Window:
