@@ -466,17 +466,19 @@ class SuperMimicRunner:
         """关闭事件文件写入器；环境由调用方负责释放。"""
         self.logger.close()
 
-    def save(self, path):
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"format": self.spec.model_id, "spec": asdict(self.spec), "spec_hash": self.spec.hash,
+    def _checkpoint_state(self):
+        return {"format": self.spec.model_id, "spec": asdict(self.spec), "spec_hash": self.spec.hash,
                 "config": asdict(self.config), "execution": asdict(self.execution), "control_enabled": self.control_enabled,
                 "actor": self.actor.state_dict(), "critic": self.critic.state_dict(), "world_model": self.model.state_dict(),
                 "learner": self.learner.state_dict(), "iteration": self.iteration, "real_steps": self.real_steps,
                 "imagined_steps": self.imagined_steps, "rng": torch.get_rng_state(),
                 "cuda_rng": torch.cuda.get_rng_state_all() if self.device.type == "cuda" else None}
+
+    def save(self, path):
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(path.suffix + ".tmp")
-        torch.save(data, temporary)
+        torch.save(self._checkpoint_state(), temporary)
         os.replace(temporary, path)
         if self._collapse_strikes == 0:
             self._remember_safe_policy()
@@ -488,8 +490,15 @@ class SuperMimicRunner:
         网络结构变化时保留当前任务定义，重建相应网络并应用参考重预热排期。
         """
         data = torch.load(path, map_location=self.device, weights_only=False)
-        if data.get("format") != self.spec.model_id:
+        if data["format"] != self.spec.model_id:
             raise ValueError("SuperMimic checkpoint format or task specification mismatch")
+        self._restore_checkpoint(data, continue_run=continue_run, reset_critic=reset_critic)
+        print(f"Resumed from {path} (iteration {data['iteration']})", flush=True)
+        if continue_run:
+            print(f"Continuing at iteration {self.iteration}", flush=True)
+        return data
+
+    def _restore_checkpoint(self, data, *, continue_run, reset_critic):
         same = {}
         for name, checkpoint_key in (("actor", "actor"), ("critic", "critic"), ("model", "world_model")):
             state = data[checkpoint_key]
@@ -497,21 +506,21 @@ class SuperMimicRunner:
             same[name] = set(current) == set(state) and all(current[key].shape == state[key].shape for key in current)
         if not same["actor"]:
             raise ValueError("Actor shape changed: no warm start is defined for this observation or architecture")
-        saved_learner = data.get("learner", {})
+        saved_learner = data["learner"]
         counters = {name: data[name] if continue_run else 0 for name in ("iteration", "real_steps", "imagined_steps")}
-        self.actor.load_state_dict(data["actor"])
+        self.actor.load_state_dict(data["actor"], strict=True)
         if same["model"]:
-            self.model.load_state_dict(data["world_model"])
+            self.model.load_state_dict(data["world_model"], strict=True)
         same["critic"] = same["critic"] and not reset_critic
         if same["critic"]:
-            self.critic.load_state_dict(data["critic"])
+            self.critic.load_state_dict(data["critic"], strict=True)
         self.learner = self._make_learner()
         for name in ("actor", "model", "critic"):
-            if same[name] and name in saved_learner:
+            if same[name]:
                 self.learner.load_optimizer_state_dict(name, saved_learner[name])
-            # 该累计计数仅用于本项目日志，不影响来源的学习率和预热排期。
-            if continue_run and same[name]:
-                setattr(self.learner, name + "_updates", saved_learner.get(name + "_updates", 0))
+                # 该累计计数仅用于本项目日志，不影响来源的学习率和预热排期。
+                if continue_run:
+                    setattr(self.learner, name + "_updates", saved_learner[name + "_updates"])
         if not same["model"]:
             self.learner.policy_start = max(self.learner.policy_start, self.config.wm_rewarmup_iterations)
             self.learner.actor_frozen_until = self.learner.policy_start + self.config.critic_warmup_iterations
@@ -535,7 +544,3 @@ class SuperMimicRunner:
         self._collapse_strikes = 0
         self._guard_falls, self._guard_reset_steps = 0.0, 0
         self._safe_policy = None
-        print(f"Resumed from {path} (iteration {data.get('iteration')})", flush=True)
-        if continue_run:
-            print(f"Continuing at iteration {self.iteration}", flush=True)
-        return data

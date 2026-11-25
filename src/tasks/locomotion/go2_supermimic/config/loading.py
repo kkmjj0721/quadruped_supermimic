@@ -6,17 +6,21 @@
 
 from copy import deepcopy
 from dataclasses import fields
-
-from agents.supermimic.config import SuperMimicConfig
 import json
 import math
 from pathlib import Path
+
+from agents.supermimic.config import SuperMimicConfig
+from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
+
+
+_JSON_VALUE_TYPES = {float: (int, float), tuple: (tuple, list), list: (tuple, list), type(None): (type(None), int)}
 
 
 def _merge_mapping(defaults: dict, values: dict) -> dict:
     result = deepcopy(defaults)
     for name, value in values.items():
-        if isinstance(result.get(name), dict) and isinstance(value, dict):
+        if name in result and isinstance(result[name], dict) and isinstance(value, dict):
             result[name] = _merge_mapping(result[name], value)
         else:
             result[name] = deepcopy(value)
@@ -29,64 +33,41 @@ def apply_settings(target, values: dict, prefix: str = "", *, replace_mappings: 
         raise ValueError(f"Configuration section {prefix or 'root'} must be an object")
     for name, value in values.items():
         path = f"{prefix}.{name}" if prefix else name
-        if name.startswith("_") or not hasattr(target, name):
+        if name.startswith("_"):
             raise ValueError(f"Unknown task configuration field: {path}")
         current = getattr(target, name)
-        # 兼容既有BaseConfig快照中的空方法元数据，不覆盖实际实例方法。
         if callable(current):
-            if not prefix and name in ("init_member_classes", "to_dict") and value == {}:
-                continue
             raise ValueError(f"Task configuration field is not writable: {path}")
         if hasattr(current, "__dict__"):
             apply_settings(current, value, path, replace_mappings=replace_mappings)
             continue
-        if isinstance(current, dict):
-            if not isinstance(value, dict):
-                raise ValueError(f"Task configuration field {path} must be an object")
+        kind = type(current)
+        allowed = _JSON_VALUE_TYPES[kind] if kind in _JSON_VALUE_TYPES else (kind,)
+        if type(value) not in allowed:
+            names = " or ".join(expected.__name__ for expected in allowed)
+            raise ValueError(f"Task configuration field {path} must be {names}")
+        if kind is dict:
             value = deepcopy(value) if replace_mappings else _merge_mapping(current, value)
-        elif isinstance(current, bool):
-            if not isinstance(value, bool):
-                raise ValueError(f"Task configuration field {path} must be a boolean")
-        elif isinstance(current, int):
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise ValueError(f"Task configuration field {path} must be an integer")
-        elif isinstance(current, float):
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-                raise ValueError(f"Task configuration field {path} must be finite numeric data")
-        elif isinstance(current, str):
-            if not isinstance(value, str):
-                raise ValueError(f"Task configuration field {path} must be a string")
-        elif isinstance(current, (tuple, list)):
-            if not isinstance(value, (tuple, list)):
-                raise ValueError(f"Task configuration field {path} must be an array")
-            value = type(current)(value)
-        setattr(target, name, deepcopy(value))
+        elif kind in (tuple, list):
+            value = kind(deepcopy(value))
+        setattr(target, name, value)
 
 
-def read_settings(path: Path) -> tuple[dict, bool]:
-    if not path.is_file():
-        raise FileNotFoundError(f"Task configuration file not found: {path}")
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        # JSON解析器默认接受NaN／Infinity；配置快照只接受有限JSON数值。
-        json.dumps(payload, allow_nan=False)
-    except (ValueError, UnicodeError) as error:
-        raise ValueError(f"Invalid task configuration JSON: {path}") from error
+def load_task_config(path: Path, *, require_snapshot: bool = False) -> tuple[Go2ReferenceCfg, dict]:
+    """仅在外部 JSON 入口检查并装配任务配置，返回同次读取的原始元数据。"""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    json.dumps(payload, allow_nan=False)
     if not isinstance(payload, dict):
         raise ValueError("Task configuration JSON must be an object")
-    settings = payload.get("config", payload)
-    if not isinstance(settings, dict):
-        raise ValueError("Task configuration snapshot must contain an object in config")
-    return settings, "config" in payload
-
-
-def configuration_for_settings(settings: dict):
-    """配置I/O边界只接受当前PROOF教师，不迁移旧MoE快照。"""
-    from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
-
-    if "algorithm" in settings and settings["algorithm"] != "proof_teacher":
-        raise ValueError(f"Unsupported SuperMimic algorithm: {settings['algorithm']}")
-    return Go2ReferenceCfg()
+    wrapped = "config" in payload
+    settings = payload["config"] if wrapped else payload
+    cfg = Go2ReferenceCfg()
+    sections = set(cfg.to_dict())
+    if require_snapshot and (not wrapped or not sections.issubset(settings)):
+        raise ValueError(f"A complete task configuration snapshot is required: {path}")
+    apply_settings(cfg, settings, replace_mappings=wrapped or sections.issubset(settings))
+    validate_config(cfg)
+    return cfg, payload
 
 
 def validate_config(cfg) -> None:
@@ -98,16 +79,13 @@ def validate_config(cfg) -> None:
         raise ValueError("PROOF teacher dimensions must be history10, proprioception45, critic285 and heightmap162")
     if not cfg.commands.heading_command or cfg.commands.rel_heading_envs != 1.0 or cfg.commands.stages:
         raise ValueError("The Go2 teacher requires heading commands and the existing fixed velocity ranges")
-    if isinstance(cfg.env.num_envs, bool) or not isinstance(cfg.env.num_envs, int) or cfg.env.num_envs < 1:
-        raise ValueError("Environment count must be a positive integer")
-    if isinstance(cfg.control.decimation, bool) or not isinstance(cfg.control.decimation, int) or cfg.control.decimation < 1:
+    if cfg.control.decimation < 1:
         raise ValueError("Control decimation must be a positive integer")
     for name, value in (("episode_length_s", cfg.env.episode_length_s), ("timestep", cfg.sim.timestep),
-                        ("scan_resolution_m", cfg.terrain.scan_resolution_m),
                         ("tracking_linear_variance", cfg.reward.tracking_linear_variance),
                         ("tracking_angular_variance", cfg.reward.tracking_angular_variance),
                         ("fall_softness_deg", cfg.reward.fall_softness_deg)):
-        if not math.isfinite(value) or value <= 0:
+        if value <= 0:
             raise ValueError(f"Task parameter must be positive and finite: {name}")
     if not 0 < cfg.reward.fall_angle < math.pi:
         raise ValueError("Fall angle must be between zero and pi")
@@ -117,12 +95,9 @@ def validate_config(cfg) -> None:
         raise ValueError("PROOF teacher heightmap requires a 1.7x0.8m grid with 0.1m spacing")
     if not 0 <= cfg.teacher.exteroceptive_dropout <= 1:
         raise ValueError("Exteroceptive dropout must be a probability")
-    for value in cfg.to_dict()["reward"]["scales"].values():
-        if not math.isfinite(value):
-            raise ValueError("Reward weights must be finite")
     command_ranges = (*cfg.commands.initial_ranges, cfg.commands.heading_range, cfg.commands.resampling_time)
     if len(cfg.commands.initial_ranges) != 3 or any(
-        len(bounds) != 2 or not all(math.isfinite(value) for value in bounds) or bounds[0] > bounds[1]
+        len(bounds) != 2 or any(type(value) not in (int, float) for value in bounds) or bounds[0] > bounds[1]
         for bounds in command_ranges
     ):
         raise ValueError("Command ranges must be finite and ordered pairs")

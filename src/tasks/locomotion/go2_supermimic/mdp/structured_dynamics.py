@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-import math
-
 import torch
 from torch import Tensor
 
@@ -28,10 +26,6 @@ class ResidualDynamics:
     """
 
     def __init__(self, dt: float, substeps: int):
-        if isinstance(dt, bool) or not isinstance(dt, (int, float)) or not math.isfinite(dt) or dt <= 0:
-            raise ValueError("Dynamics dt must be positive and finite")
-        if isinstance(substeps, bool) or not isinstance(substeps, int) or substeps < 1:
-            raise ValueError("Dynamics substeps must be a positive integer")
         self.dt = float(dt)
         self.drift_weight = (substeps + 1) / (2 * substeps)
 

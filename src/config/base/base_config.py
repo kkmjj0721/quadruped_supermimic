@@ -28,7 +28,9 @@ class BaseConfig:
                 if k.startswith("_"):
                     continue
                 v = getattr(obj, k)
-                if inspect.isclass(v) or (isinstance(v, object) and hasattr(v, "__dict__")):
+                if callable(v):
+                    continue
+                if hasattr(v, "__dict__"):
                     res[k] = _to_dict(v)
                 else:
                     res[k] = v

@@ -48,6 +48,8 @@ uv run --no-sync python scripts/play.py Unitree-Go2-SuperMimic-Rough \
 
 没有检查点时，可用 `--agent zero --num-envs 1` 查看环境。SuperMimic 播放需要保留检查点同目录的 `task_config.json`。完整参数可在训练或播放命令后添加 `--help` 查看。
 
+包含 `init_member_classes` 或 `to_dict` 字段的旧任务快照不再支持播放、导出或原样续训。需要复用旧权重时，训练可用 `--resume` 搭配显式的新格式 `--task-config` 热启动，不加 `--continue-run`。
+
 ## 项目结构
 
 ```text

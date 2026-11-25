@@ -130,6 +130,7 @@ class MetricWindow:
 
     可选编译固定布局的打包与累计核心，主机字典和跨轮调度不进入图。
     最近100回合等快照取末轮；缺省和空回合窗口不进入均值分母。
+    每轮必须传入主机整数iteration和collection/control_steps。
     同名指标在窗口中固定使用主机数值或同一设备张量，沿用训练循环的来源约定。
     """
 
@@ -159,15 +160,13 @@ class MetricWindow:
 
     @torch.no_grad()
     def add(self, metrics, *, validity=None):
+        iteration = metrics["iteration"]
+        steps = metrics["collection/control_steps"]
         validity = validity if validity is not None else {}
         self.iterations += 1
-        iteration = metrics.get("iteration", self.iterations)
-        if isinstance(iteration, torch.Tensor):
-            iteration = iteration.detach().clone()
-        if self.start_iteration is None:
+        if self.iterations == 1:
             self.start_iteration = iteration
         self.end_iteration = iteration
-        steps = metrics.get("collection/control_steps", 1)
         device_values = {}
         for name in list(self._host):
             if name not in metrics and _metric_reduction(name) == "last":
@@ -178,7 +177,7 @@ class MetricWindow:
                 continue
             valid = validity.get(name, True)
             mode = _metric_reduction(name)
-            if isinstance(valid, torch.Tensor) or mode == "weighted" and isinstance(steps, torch.Tensor):
+            if isinstance(valid, torch.Tensor):
                 device_values[name] = torch.as_tensor(value, device=self.device).detach().reshape(())
                 continue
             weight = steps if mode == "weighted" else 1
@@ -215,10 +214,7 @@ class MetricWindow:
             masks.append(valid.detach().reshape(()) if isinstance(valid, torch.Tensor)
                          else self._mask_defaults[name][bool(valid)])
         # 2/3步交替只更新设备值，避免Python步数参与编译值特化。
-        if isinstance(steps, torch.Tensor):
-            self._steps.copy_(steps)
-        else:
-            self._steps.fill_(steps)
+        self._steps.fill_(steps)
         self._accumulate(tuple(values), tuple(masks), self._totals, self._counts,
                          self._last, self._weighted, self._steps)
 
@@ -242,14 +238,14 @@ class MetricWindow:
 
 
 def read_metrics(metrics, device, *, validity=None):
-    """一次回传张量，仅按有效掩码排除空窗口指标。"""
+    """保留主机标量类型，一次回传张量，仅按有效掩码排除空窗口指标。"""
     validity = validity if validity is not None else {}
     tensor_names = [name for name, value in metrics.items() if isinstance(value, torch.Tensor)]
     mask_names = list(validity)
     packed = [metrics[name].detach().to(device=device, dtype=torch.float64).reshape(()) for name in tensor_names]
     packed.extend(torch.as_tensor(validity[name], device=device, dtype=torch.float64).reshape(()) for name in mask_names)
     values = torch.stack(packed).cpu().tolist() if packed else []
-    result = {name: float(value) for name, value in metrics.items() if name not in tensor_names}
+    result = dict(metrics)
     result.update(zip(tensor_names, values[:len(tensor_names)]))
     for name, valid in zip(mask_names, values[len(tensor_names):]):
         if not valid:

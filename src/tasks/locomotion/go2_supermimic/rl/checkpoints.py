@@ -1,30 +1,26 @@
 # Copyright (c) 2026-2027 zh
 """
 内容：
-    恢复SuperMimic训练配置并校验播放检查点，只装配策略和归一化统计。
+    恢复SuperMimic训练配置并校验播放检查点，严格装配策略和归一化统计。
 """
 
 from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass
-import json
 from pathlib import Path
 
 import torch
 
 from agents.supermimic.config import SuperMimicConfig
-from agents.supermimic.interfaces import AlgorithmSpec
 from agents.supermimic.export import export_policy
+from agents.supermimic.interfaces import AlgorithmSpec
 from agents.supermimic.policy import make_actor
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
+from ..config.loading import algorithm_config, load_task_config
 from ..config.train_cfg import TASK_MODES
-from ..config.loading import validate_config
-from ..mdp.reference_task import Go2ReferenceTaskModel
-from ..config.loading import (
-    apply_settings, read_settings, configuration_for_settings, algorithm_config,
-)
+from ..mdp.reference_task import Go2ReferenceTaskModel, build_go2_task_spec
 
 
 @dataclass(frozen=True)
@@ -33,143 +29,93 @@ class PlaybackSource:
 
     cfg: Go2ReferenceCfg
     checkpoint: dict
-    path: Path
-    snapshot: dict
+    spec: AlgorithmSpec
+    geometry_hash: str
+
+
+def _checkpoint_spec(checkpoint: dict) -> AlgorithmSpec:
+    if checkpoint["format"] != "supermimic_proof_teacher_v2":
+        raise ValueError("Incompatible SuperMimic checkpoint format")
+    spec = AlgorithmSpec(**checkpoint["spec"])
+    if spec.model_id != checkpoint["format"] or not spec.semantic_id.startswith("go2_proof_teacher_"):
+        raise ValueError("Checkpoint does not describe a Go2 SuperMimic task")
+    layout = Go2ReferenceCfg.env
+    if (spec.observation_dim, spec.history_length, spec.action_dim, spec.heightmap_dim) != (
+            layout.num_observations, layout.num_obs_history, layout.num_actions, layout.heightmap_dim):
+        raise ValueError("Unsupported Go2 policy observation or action layout")
+    if spec.hash != checkpoint["spec_hash"]:
+        raise ValueError("Checkpoint specification hash mismatch")
+    return spec
+
+
+def _load_bundle(checkpoint_path):
+    path = Path(checkpoint_path).expanduser().resolve()
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    spec = _checkpoint_spec(checkpoint)
+    cfg, snapshot = load_task_config(path.parent / "task_config.json", require_snapshot=True)
+    if snapshot["spec_hash"] != checkpoint["spec_hash"]:
+        raise ValueError("Checkpoint and task snapshot metadata mismatch")
+    return checkpoint, spec, cfg, snapshot
 
 
 def load_playback_source(task_id: str, checkpoint_file: str | Path) -> PlaybackSource:
     """读取可信本项目检查点及同目录的完整任务快照，不创建仿真。"""
-    if task_id not in TASK_MODES:
-        raise ValueError(f"Unknown Go2 SuperMimic task: {task_id}")
-    path = Path(checkpoint_file).expanduser().resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"Checkpoint file not found: {path}")
-    snapshot_path = path.parent / "task_config.json"
-    settings, wrapped = read_settings(snapshot_path)
-    if not wrapped:
-        raise ValueError("Playback requires a complete task_config.json snapshot with metadata")
-    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-    if any(not isinstance(snapshot.get(name), str) or not snapshot[name] for name in ("spec_hash", "geometry_hash")):
-        raise ValueError("Task snapshot is missing spec_hash or geometry_hash metadata")
-    cfg = configuration_for_settings(settings)
-    sections = set(cfg.to_dict()) - {"init_member_classes", "to_dict"}
-    if not sections.issubset(settings):
-        raise ValueError("Playback requires all task configuration sections")
-    apply_settings(cfg, settings, replace_mappings=True)
-    validate_config(cfg)
+    checkpoint, spec, cfg, snapshot = _load_bundle(checkpoint_file)
     if cfg.terrain.mode != TASK_MODES[task_id]:
         raise ValueError("Playback task terrain mode differs from the saved configuration")
-    # 与训练保持相同的可信文件约定；只把所需策略装配到目标设备。
-    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_proof_teacher_v2":
-        raise ValueError("Incompatible SuperMimic checkpoint format")
-    task_metadata = checkpoint.get("go2_task")
-    if (not isinstance(task_metadata, dict) or not isinstance(task_metadata.get("curriculum"), dict)
-            or task_metadata.get("spec_hash") != snapshot["spec_hash"]
-            or checkpoint.get("spec_hash") != snapshot["spec_hash"]):
-        raise ValueError("Checkpoint and task snapshot metadata mismatch")
-    if not isinstance(checkpoint.get("spec"), dict) or not isinstance(checkpoint.get("actor"), dict):
-        raise ValueError("Checkpoint is missing the algorithm spec or policy state")
-    return PlaybackSource(cfg, checkpoint, path, snapshot)
+    if checkpoint["go2_task"]["spec_hash"] != checkpoint["spec_hash"]:
+        raise ValueError("Checkpoint curriculum specification mismatch")
+    return PlaybackSource(cfg, checkpoint, spec, snapshot["geometry_hash"])
+
+
+def _make_checkpoint_actor(checkpoint, spec, algorithm, device="cpu"):
+    actor = make_actor(spec, algorithm, Go2ReferenceTaskModel.observation_term_dims).to(device)
+    actor.load_state_dict(checkpoint["actor"], strict=True)
+    return actor.eval().requires_grad_(False)
 
 
 def build_playback_policy(source: PlaybackSource, adapter) -> torch.nn.Module:
-    """用原训练语义验证权重，播放允许单环境、无噪声、固定课程并始终启用高程。"""
-    expected, actual = source.cfg.to_dict(), adapter.cfg.to_dict()
-    for section, name in (("env", "num_envs"), ("noise", "add_noise"), ("terrain", "curriculum"),
-                          ("teacher", "exteroceptive_dropout")):
-        expected[section][name] = actual[section][name]
-    expected["domain_randomization"]["enabled"] = actual["domain_randomization"]["enabled"]
-    if json.dumps(expected, sort_keys=True) != json.dumps(actual, sort_keys=True):
-        raise ValueError("Playback configuration changed unsupported task semantics")
-    if source.snapshot["geometry_hash"] != adapter.surface.geometry_hash:
+    """核对训练任务身份和当前几何，只装配播放策略。"""
+    if source.geometry_hash != adapter.surface.geometry_hash:
         raise ValueError("Playback terrain geometry differs from the saved task")
-    original_cfg = deepcopy(source.cfg)
-    original_task = Go2ReferenceTaskModel(original_cfg, adapter.task.default_joint_pos, adapter.task.joint_limits,
-                                         adapter.surface, device=adapter.device)
-    checkpoint = source.checkpoint
-    if checkpoint["spec"] != asdict(original_task.spec) or checkpoint["spec_hash"] != original_task.spec.hash:
+    task = adapter.task
+    cfg = deepcopy(adapter.cfg)
+    cfg.env.num_envs = source.cfg.env.num_envs
+    cfg.noise.add_noise = source.cfg.noise.add_noise
+    cfg.terrain.curriculum = source.cfg.terrain.curriculum
+    cfg.teacher.exteroceptive_dropout = source.cfg.teacher.exteroceptive_dropout
+    cfg.domain_randomization.enabled = source.cfg.domain_randomization.enabled
+    expected = build_go2_task_spec(cfg, source.geometry_hash, task.default_joint_pos, task.joint_limits,
+                                   task.heightmap_dim)
+    if source.spec != expected:
         raise ValueError("Checkpoint task spec does not match the saved configuration and current robot")
-    policy_config = algorithm_config(source.cfg)
-    if asdict(SuperMimicConfig(**checkpoint["config"])) != asdict(policy_config):
+    algorithm = algorithm_config(source.cfg)
+    if source.checkpoint["config"] != asdict(algorithm):
         raise ValueError("SuperMimic checkpoint configuration mismatch")
-    policy = make_actor(original_task.spec, policy_config,
-                        observation_term_dims=original_task.observation_term_dims).to(adapter.device)
-    weights = checkpoint["actor"]
-    for name, tensor in weights.items():
-        if not isinstance(tensor, torch.Tensor) or not torch.isfinite(tensor).all():
-            raise ValueError(f"Invalid checkpoint policy tensor: {name}")
-        if name.endswith(("normalizer.variance", "normalizer.var", "normalizer.count")) and (tensor < 0).any():
-            raise ValueError(f"Invalid checkpoint normalization statistics: {name}")
-    policy.load_state_dict(weights, strict=True)
-    policy.eval()
-    policy.requires_grad_(False)
-    return policy
+    return _make_checkpoint_actor(source.checkpoint, source.spec, algorithm, adapter.device)
 
 
 def checkpoint_actor(checkpoint: dict):
-    """只从检查点装配actor；部署不分任务策略之外的世界模型与critic。"""
-    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_proof_teacher_v2":
-        raise ValueError("Incompatible SuperMimic velocity-policy checkpoint format")
-    if not isinstance(checkpoint.get("config"), dict) or not isinstance(checkpoint.get("spec"), dict):
-        raise ValueError("Checkpoint is missing the algorithm configuration or task specification")
-    if any(not torch.isfinite(value).all() for value in checkpoint["actor"].values()):
-        raise ValueError("Checkpoint contains non-finite policy tensors")
-    spec = AlgorithmSpec(**checkpoint["spec"])
-    if not spec.semantic_id.startswith("go2_proof_teacher_"):
-        raise ValueError("Checkpoint does not describe a Go2 SuperMimic task")
-    if checkpoint["format"] != spec.model_id:
-        raise ValueError("Checkpoint format differs from the policy model identifier")
+    """只从外部检查点装配actor，不加载世界模型或critic。"""
+    spec = _checkpoint_spec(checkpoint)
     algorithm = SuperMimicConfig(**checkpoint["config"])
-    if spec.observation_dim != 45:
-        raise ValueError(f"Unsupported Go2 policy observation dimension: {spec.observation_dim}")
-    if spec.history_length != 10:
-        raise ValueError(f"Unsupported Go2 policy history length: {spec.history_length}")
-    terms = Go2ReferenceTaskModel.observation_term_dims
-    actor = make_actor(spec, algorithm, terms)
-    actor.load_state_dict(checkpoint["actor"], strict=True)
-    return actor.eval().requires_grad_(False), algorithm
+    return _make_checkpoint_actor(checkpoint, spec, algorithm), algorithm
 
 
 def export_checkpoint(checkpoint_path: str | Path, directory: str | Path, *, iteration: int | None = None):
     """读取检查点与同目录任务快照，导出PT/ONNX/JSON三件套。"""
-    path = Path(checkpoint_path).expanduser().resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"Checkpoint file not found: {path}")
-    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_proof_teacher_v2":
-        raise ValueError(f"Not a SuperMimic checkpoint: {path}")
-    execution = checkpoint["execution"]
-    if not isinstance(execution, dict):
-        raise ValueError("Checkpoint execution configuration must be an object")
-    actor_bf16 = execution["actor_bf16"]
-    if not isinstance(actor_bf16, bool):
+    checkpoint, spec, cfg, _ = _load_bundle(checkpoint_path)
+    actor_bf16 = checkpoint["execution"]["actor_bf16"]
+    if type(actor_bf16) is not bool:
         raise ValueError("Checkpoint execution.actor_bf16 must be a boolean")
-    # 任务快照与播放共用同一份可信来源和同一套覆盖规则。
-    snapshot_path = path.parent / "task_config.json"
-    settings, wrapped = read_settings(snapshot_path)
-    if not wrapped:
-        raise ValueError(f"Export requires a complete task snapshot: {snapshot_path}")
-    cfg = configuration_for_settings(settings)
-    apply_settings(cfg, settings, replace_mappings=True)
-    if json.loads(snapshot_path.read_text(encoding="utf-8")).get("spec_hash") != checkpoint.get("spec_hash"):
-        raise ValueError("Checkpoint and task snapshot metadata mismatch")
-    validate_config(cfg)
-    expected_width = 45
-    if (checkpoint["spec"]["observation_dim"] != expected_width
-            or cfg.env.num_observations != expected_width
-            or checkpoint["spec"]["history_length"] != cfg.env.num_obs_history
-            or cfg.env.num_obs != expected_width * cfg.env.num_obs_history
-            or checkpoint["spec"]["heightmap_dim"] != cfg.env.heightmap_dim):
-        raise ValueError("Checkpoint observation layout differs from the saved task configuration")
-    actor, algorithm = checkpoint_actor(checkpoint)
+    algorithm = SuperMimicConfig(**checkpoint["config"])
+    actor = _make_checkpoint_actor(checkpoint, spec, algorithm)
     iteration = checkpoint["iteration"] if iteration is None else iteration
-    if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
+    if type(iteration) is not int or iteration < 0:
         raise ValueError("Export iteration must be a nonnegative integer")
     from .deployment import deployment_metadata
 
     metadata = deployment_metadata(cfg, spec_hash=checkpoint["spec_hash"], algorithm=algorithm)
     # 离线重建的 actor 使用 FP32；训练来源精度由检查点执行配置保留。
     metadata["source_network_precision"] = "bf16" if actor_bf16 else "fp32"
-    return export_policy(actor, Path(directory).expanduser().resolve(), iteration=iteration,
-                         metadata=metadata)
+    return export_policy(actor, Path(directory).expanduser().resolve(), iteration=iteration, metadata=metadata)

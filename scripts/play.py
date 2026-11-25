@@ -60,20 +60,8 @@ def _print_help(stream) -> None:
         print(f"  {task}", file=stream)
 
 
-def _validate_task(task_id: str) -> None:
-    """拒绝项目未提供的播放任务。"""
-    from src.tasks.locomotion.go2_supermimic.config.train_cfg import TASK_MODES
-
-    if task_id not in TASK_MODES:
-        raise ValueError(f"Unsupported playback task: {task_id}")
-
-
 def _validate_config(cfg: PlayConfig) -> None:
     """在分配仿真资源前检查入口参数。"""
-    if cfg.agent not in ("zero", "random", "trained"):
-        raise ValueError(f"Unsupported agent mode: {cfg.agent}")
-    if cfg.viewer not in ("auto", "native", "viser"):
-        raise ValueError(f"Unsupported viewer backend: {cfg.viewer}")
     for name in ("num_envs", "video_height", "video_width"):
         value = getattr(cfg, name)
         if value is not None and value <= 0:
@@ -108,15 +96,14 @@ def _resolve_checkpoint(cfg: PlayConfig) -> Path | None:
 
 def run_play(task_id: str, cfg: PlayConfig) -> None:
     """装配 SuperMimic 播放环境和策略，并确保退出时关闭环境。"""
-    _validate_task(task_id)
     _validate_config(cfg)
     checkpoint = _resolve_checkpoint(cfg)
     configure_torch_backends()
     device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    from src.tasks.locomotion.go2_supermimic.rl.playback import make_playback_env
+    from src.tasks.locomotion.go2_supermimic.rl.playback import make_playback
 
-    env, policy = make_playback_env(
+    env, policy = make_playback(
         task_id, checkpoint_file=checkpoint, agent=cfg.agent, num_envs=cfg.num_envs, device=device,
         video=cfg.video, video_length=cfg.video_length, video_height=cfg.video_height,
         video_width=cfg.video_width, no_terminations=cfg.no_terminations,

@@ -31,6 +31,25 @@ from .state_spec import (
 )
 
 
+def build_go2_task_spec(cfg, geometry_hash, default_joint_pos: Tensor, joint_limits: Tensor, heightmap_dim: int):
+    """用训练语义、几何和资产参数生成任务规格，不装配运行时模型。"""
+    config = cfg.to_dict()
+    config["runner"] = {name: value for name, value in config["runner"].items() if name not in RUNNER_RUNTIME_FIELDS}
+    for name in ("actor_optimizer", "wm_optimizer", "muon_weight_decay"):
+        config["algo"].pop(name)
+    payload = {"task": config, "geometry": geometry_hash, "default_joint_pos": default_joint_pos.cpu().tolist(),
+               "joint_limits": joint_limits.cpu().tolist(),
+               "layout": "proof_teacher_physical147_quat4_memory54_context27_critic285_contact_events_v3",
+               "contact_force_frame": "world_force_on_robot", "dynamics": "blinkmimic_residual_fk_quaternion_v1"}
+    semantic_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    return AlgorithmSpec(
+        state_dim=PHYSICAL_DIM + 4, delta_dim=PHYSICAL_DIM - 45, action_dim=12,
+        observation_dim=45, privileged_dim=cfg.env.num_critic_obs, context_dim=CONTEXT_DIM,
+        memory_dim=MEMORY_DIM, command_dim=3, heightmap_dim=heightmap_dim, history_length=cfg.env.num_obs_history,
+        semantic_id="go2_proof_teacher_ae910b8_contact_events_residual_fk_v3:" + semantic_hash,
+        model_id="supermimic_proof_teacher_v2")
+
+
 class Go2ReferenceTaskModel:
     """真实采集与想象共用教师观测、残差状态、奖励和回合记忆。"""
 
@@ -67,33 +86,13 @@ class Go2ReferenceTaskModel:
         self.noise_amplitude = self.default_joint_pos.new_tensor(
             (noise.base_ang_vel,) * 3 + (noise.projected_gravity,) * 3 + (0.,) * 3
             + (noise.joint_pos,) * 12 + (noise.joint_vel,) * 12 + (0.,) * 12) * cfg.noise.noise_level
-        payload = {"task": self._semantic_config(), "geometry": surface.geometry_hash,
-                   "default_joint_pos": self.default_joint_pos.cpu().tolist(),
-                   "joint_limits": self.joint_limits.cpu().tolist(),
-                   "layout": "proof_teacher_physical147_quat4_memory54_context27_critic285_contact_events_v3",
-                   "contact_force_frame": "world_force_on_robot",
-                   "dynamics": "blinkmimic_residual_fk_quaternion_v1"}
-        self.semantic_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
-        self.spec = AlgorithmSpec(
-            state_dim=PHYSICAL_DIM + 4, delta_dim=PHYSICAL_DIM - 45, action_dim=12,
-            observation_dim=45, privileged_dim=cfg.env.num_critic_obs, context_dim=CONTEXT_DIM,
-            memory_dim=MEMORY_DIM, command_dim=3, heightmap_dim=self.heightmap_dim,
-            history_length=cfg.env.num_obs_history,
-            semantic_id="go2_proof_teacher_ae910b8_contact_events_residual_fk_v3:" + self.semantic_hash,
-            model_id="supermimic_proof_teacher_v2")
-
-    def _semantic_config(self) -> dict:
-        """运行预算不改变任务语义；模型与观测结构由快照完整描述。"""
-        config = self.cfg.to_dict()
-        config["runner"] = {name: value for name, value in config["runner"].items() if name not in RUNNER_RUNTIME_FIELDS}
-        for name in ("actor_optimizer", "wm_optimizer", "muon_weight_decay"):
-            config["algo"].pop(name)
-        return config
+        self.spec = build_go2_task_spec(self.cfg, surface.geometry_hash, self.default_joint_pos, self.joint_limits,
+                                        self.heightmap_dim)
 
     # ---------- 真实物理状态 ----------
 
     def surface_height(self, xy: Tensor) -> Tensor:
-        return self.surface.height_unchecked(xy)
+        return self.surface.height(xy)
 
     def bind_env(self, env):
         robot = env.scene["robot"]

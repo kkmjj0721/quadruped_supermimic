@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from copy import deepcopy
 from dataclasses import replace
 
@@ -104,13 +103,11 @@ class TerrainMap:
     def bind(self, origins):
         if self.plane:
             return
-        if origins is None or tuple(origins.shape) != (self.rows, self.cols, 3) or not torch.isfinite(origins).all():
+        if tuple(origins.shape) != (self.rows, self.cols, 3) or not torch.isfinite(origins).all():
             raise ValueError("Compiled terrain origins differ from the reference map")
         self.origins = origins.detach().clone()
 
     def spawn_origins(self, family_ids, levels):
-        if self.plane:
-            raise ValueError("Plane origins are allocated by the environment")
         return self.origins[levels, family_ids].clone()
 
 
@@ -118,24 +115,14 @@ class PlaneSurface:
     """无界平面，前向保留数值为零的位置导数。"""
 
     def __init__(self, device="cpu", height=0.0):
-        if not math.isfinite(height):
-            raise ValueError("Plane height must be finite")
         self.device = torch.device(device)
         self.elevation = float(height)
         self.geometry_hash = hashlib.sha256(f"plane/{self.elevation}".encode()).hexdigest()
 
     def contains(self, xy, margin=0.0):
-        if margin < 0 or not math.isfinite(margin):
-            raise ValueError("Terrain query margin must be finite and nonnegative")
         return torch.isfinite(xy).all(dim=-1)
 
     def height(self, xy):
-        if xy.shape[-1] != 2 or not torch.isfinite(xy).all():
-            raise ValueError("Terrain query must contain finite XY points")
-        return self.height_unchecked(xy)
-
-    def height_unchecked(self, xy):
-        """由调用边界保证输入有效的纯张量版本，供编译想象使用。"""
         return xy.sum(-1) * 0 + self.elevation
 
 
@@ -146,8 +133,6 @@ class TerrainGeometry:
 
     @classmethod
     def from_model(cls, model, device="cpu", terrain_map=None):
-        if terrain_map is None:
-            raise ValueError("TerrainSurface requires the compiled terrain map")
         if terrain_map.plane:
             return PlaneSurface(device)
         self = cls()
@@ -239,8 +224,6 @@ class TerrainGeometry:
         return self
 
     def contains(self, xy, margin=0.0):
-        if margin < 0 or not math.isfinite(margin):
-            raise ValueError("Terrain query margin must be finite and nonnegative")
         return torch.isfinite(xy).all(-1) & (xy.abs() <= self.half_support - margin).all(-1)
 
     def rasterize(self, xs, ys):
@@ -284,27 +267,17 @@ class TerrainGeometry:
         return info[4] + info[5] * value
 
     def height(self, xy):
-        if xy.shape[-1] != 2 or xy.device != self.device:
-            raise ValueError("Terrain XY points must use the surface device")
-        if not self.contains(xy).all():
-            raise ValueError("Terrain query lies outside the supported surface")
-        result = self.height_unchecked(xy)
-        if not torch.isfinite(result).all():
-            raise ValueError("Terrain geometry does not cover a requested XY point")
-        return result
-
-    def height_unchecked(self, xy):
-        """已验证表面上的纯张量查询；单策略任务在外层屏蔽无支持点。"""
+        """按碰撞几何查询地块高度，未覆盖处返回负无穷。"""
         shape = xy.shape[:-1]
         points = xy.reshape(-1, 2)
         if points.shape[0] == 0:
             return points.sum(-1).reshape(shape)
-        # 分块限制箱体临时张量，保持原严格查询的数值和位置梯度。
+        # 分块限制箱体临时张量，保持查询的数值和位置梯度。
         result = torch.cat([self._height_points(chunk) for chunk in points.split(self.QUERY_CHUNK_SIZE)], dim=0)
         return result.reshape(shape)
 
     def _height_points(self, points):
-        """计算一块已验证的平面坐标，不重复执行全局边界检查或设备同步。"""
+        """用张量运算查询一批平面坐标。"""
         cell = torch.floor((points + self.half_grid) / self.size).long()
         in_grid = ((cell >= 0) & (cell < cell.new_tensor((self.rows, self.cols)))).all(-1)
         bucket = torch.where(in_grid, cell[:, 0] * self.cols + cell[:, 1], self.rows * self.cols)
@@ -368,11 +341,6 @@ class TerrainSurface:
         return torch.isfinite(xy).all(-1)
 
     def height(self, xy):
-        if xy.shape[-1] != 2 or not torch.isfinite(xy).all():
-            raise ValueError("Terrain queries must contain finite XY coordinates")
-        return self.height_unchecked(xy)
-
-    def height_unchecked(self, xy):
         gx = (xy[..., 0] - self.origin[0]) / self.res
         gy = (xy[..., 1] - self.origin[1]) / self.res
         height, width = self.h.shape

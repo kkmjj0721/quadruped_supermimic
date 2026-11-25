@@ -99,6 +99,11 @@ class Go2SuperMimicRunner(SuperMimicRunner):
         if self.expert is not None:
             self.expert.reset(done)
 
+    def _checkpoint_state(self):
+        checkpoint = super()._checkpoint_state()
+        checkpoint["go2_task"] = {"spec_hash": checkpoint["spec_hash"], "curriculum": self.env.curriculum_state_dict()}
+        return checkpoint
+
     def save(self, path):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -108,9 +113,6 @@ class Go2SuperMimicRunner(SuperMimicRunner):
             pending = temporary / path.name
             with _save_timing(self.timing, "checkpoint_prepare"):
                 super().save(pending)
-                checkpoint = torch.load(pending, map_location="cpu", weights_only=False)
-                checkpoint["go2_task"] = {"spec_hash": self.spec.hash, "curriculum": self.env.curriculum_state_dict()}
-                torch.save(checkpoint, pending)
             with _save_timing(self.timing, "onnx_export"):
                 export_policy_onnx(self.actor, temporary / "policy.onnx", iteration=self.iteration,
                                    metadata=deployment_metadata(self.env.cfg, spec_hash=self.spec.hash,
@@ -119,47 +121,37 @@ class Go2SuperMimicRunner(SuperMimicRunner):
                 os.replace(pending, path)
                 os.replace(temporary / "policy.onnx", path.parent / "policy.onnx")
 
-    def load(self, path, *, continue_run=False, reset_critic=False):
-        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-        task_state = checkpoint.get("go2_task", {})
-        if "curriculum" not in task_state:
-            raise ValueError("Go2 SuperMimic checkpoint task metadata mismatch")
-        if continue_run and (checkpoint.get("spec") != asdict(self.spec)
-                             or task_state.get("spec_hash") != self.spec.hash):
+    def _restore_checkpoint(self, checkpoint, *, continue_run, reset_critic):
+        if checkpoint["go2_task"]["spec_hash"] != checkpoint["spec_hash"]:
+            raise ValueError("Go2 checkpoint task metadata mismatch")
+        if continue_run and (checkpoint["spec"] != asdict(self.spec)
+                             or checkpoint["spec_hash"] != self.spec.hash):
             raise ValueError("Go2 task or dynamics changed; use an explicit warm start instead of continue_run")
-        super().load(path, continue_run=continue_run, reset_critic=reset_critic)
+        super()._restore_checkpoint(checkpoint, continue_run=continue_run, reset_critic=reset_critic)
         if continue_run:
             self.env.resume_progress(self.iteration)
-        return checkpoint
 
 
 def make_go2_supermimic_runner(cfg=None, *, device="cpu", log_dir=None, execution=None):
-    """构造任务环境、可选驱动策略和任务快照，失败时释放仿真资源。"""
+    """构造任务环境、可选驱动策略和任务快照。"""
     cfg = cfg if cfg is not None else Go2ReferenceCfg()
     config = algorithm_config(cfg)
     if execution is None:
         execution = ExecutionConfig(**{field.name: getattr(cfg.runner, field.name) for field in fields(ExecutionConfig)})
     torch.manual_seed(cfg.env.seed)
     env = make_go2_supermimic_env(cfg, device=device)
-    try:
-        runner = Go2SuperMimicRunner(env, config, log_dir=log_dir,
-                                     control_enabled=cfg.runner.enable_control_updates, execution=execution,
-                                     collection_groups=env.terrain_curriculum.family_ids)
-        if cfg.runner.driver.policy:
-            from .driver import MoeCtsDriver
-            runner.driver = MoeCtsDriver(cfg.runner.driver.policy, env.num_envs, env.task.default_joint_pos,
-                                         cfg.control.action_scales, runner.device)
-        if cfg.runner.driver.expert_policy:
-            from .driver import ActorDriver
-            runner.expert = ActorDriver(cfg.runner.driver.expert_policy, env.task.spec.observation_dim,
-                                        env.task.spec.action_dim, runner.device)
-        if log_dir is not None:
-            snapshot = {"config": env.cfg.to_dict(), "spec_hash": env.task.spec.hash,
-                        "geometry_hash": env.surface.geometry_hash}
-            destination = Path(log_dir)
-            destination.mkdir(parents=True, exist_ok=True)
-            (destination / "task_config.json").write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
-        return runner
-    except BaseException:
-        env.close()
-        raise
+    runner = Go2SuperMimicRunner(env, config, log_dir=log_dir, control_enabled=cfg.runner.enable_control_updates,
+                                 execution=execution, collection_groups=env.terrain_curriculum.family_ids)
+    if cfg.runner.driver.policy:
+        from .driver import MoeCtsDriver
+        runner.driver = MoeCtsDriver(cfg.runner.driver.policy, env.num_envs, env.task.default_joint_pos,
+                                     cfg.control.action_scales, runner.device)
+    if cfg.runner.driver.expert_policy:
+        from .driver import ActorDriver
+        runner.expert = ActorDriver(cfg.runner.driver.expert_policy, runner.device)
+    if log_dir is not None:
+        snapshot = {"config": env.cfg.to_dict(), "spec_hash": env.task.spec.hash, "geometry_hash": env.surface.geometry_hash}
+        destination = Path(log_dir)
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "task_config.json").write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
+    return runner

@@ -8,7 +8,6 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
 from ..go_supermimic_env_cfg import make_go2_supermimic_env_cfg
-from .loading import validate_config
 
 
 def resolve_go2_supermimic_cfg(
@@ -22,14 +21,11 @@ def resolve_go2_supermimic_cfg(
         cfg.noise.add_noise = False
         cfg.terrain.curriculum = False
         cfg.teacher.exteroceptive_dropout = 0.0
-    validate_config(cfg)
     return cfg
 
 
 def _make_env_cfg(play, go2_cfg, terrain_mode, terrain_map):
     cfg = resolve_go2_supermimic_cfg(go2_cfg, play=play, terrain_mode=terrain_mode)
-    if terrain_map is not None and terrain_map.plane != (terrain_mode == "flat"):
-        raise ValueError("Terrain map and environment configuration modes differ")
     env_cfg = make_go2_supermimic_env_cfg(cfg, terrain_map=terrain_map)
     if play:
         # 播放持续运行，跌倒重置仍由adapter的任务终止判定负责。

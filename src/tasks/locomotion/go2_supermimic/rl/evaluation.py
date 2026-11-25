@@ -16,22 +16,13 @@ from .checkpoints import export_checkpoint
 from .playback import make_playback
 
 
-def _finite_metrics(value):
-    """检查嵌套结果中的有限数值，允许没有部署文件时的空对拍结果。"""
-    if isinstance(value, dict):
-        return all(_finite_metrics(item) for item in value.values())
-    if isinstance(value, list):
-        return all(_finite_metrics(item) for item in value)
-    return math.isfinite(value) if isinstance(value, (int, float)) else True
-
-
 @torch.no_grad()
 def evaluate_policy(task_id: str, checkpoint: str | Path, *, branch="actor", device="cpu", num_envs=32,
                     seconds=20.0) -> dict:
     """固定四组命令；两分支均使用检查点配置、相同初始种子及播放历史维护。"""
     if branch not in ("actor", "zero"):
         raise ValueError("Evaluation branch must be actor or zero")
-    if isinstance(num_envs, bool) or not isinstance(num_envs, int) or num_envs < 4:
+    if num_envs < 4:
         raise ValueError("Evaluation requires at least four environments for four command groups")
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError("Evaluation duration must be positive and finite")
@@ -71,8 +62,6 @@ def evaluate_policy(task_id: str, checkpoint: str | Path, *, branch="actor", dev
                 actions = torch.zeros(num_envs, env.adapter.task.spec.action_dim, device=device)
             else:
                 actions = actor(observations)
-            if not torch.isfinite(actions).all():
-                raise FloatingPointError("Evaluation policy produced non-finite actions")
             observations, reward, terminated, truncated, info = env.step(actions)
             final = info["final_state"]
             measured = env.adapter.task.tracking_velocity(final)
@@ -120,8 +109,6 @@ def evaluate_policy(task_id: str, checkpoint: str | Path, *, branch="actor", dev
             "action_abs_max": action_max, "command_rms": float(fixed_commands.square().sum(-1).mean().sqrt()),
             "torchscript_max_abs_error": parity,
         }
-        if not _finite_metrics(result):
-            raise FloatingPointError("Evaluation produced non-finite metrics")
         return result
     finally:
         env.close()

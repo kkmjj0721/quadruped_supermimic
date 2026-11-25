@@ -89,14 +89,12 @@ class MoeCtsDriver:
 class ActorDriver:
     """把已有PROOF教师策略作为数据来源，保存专家自己的历史而不参与策略更新。"""
 
-    def __init__(self, path, observation_dim, action_dim, device):
+    def __init__(self, path, device):
         from .checkpoints import checkpoint_actor
 
         checkpoint = torch.load(Path(path), map_location=device, weights_only=False)
         self.actor, _ = checkpoint_actor(checkpoint)
         self.actor = self.actor.to(device)
-        if self.actor.observation_dim != observation_dim or self.actor.action_dim != action_dim:
-            raise ValueError("Expert policy observation and action dimensions differ from the task")
         self.history = None
         self.fresh = None
 

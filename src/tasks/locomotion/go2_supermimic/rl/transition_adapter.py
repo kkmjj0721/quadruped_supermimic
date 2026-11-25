@@ -6,17 +6,19 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+
 import torch
 from mjlab.envs import ManagerBasedRlEnv
 
-from agents.supermimic.interfaces import EnvStep, TaskState
+from agents.supermimic.interfaces import EnvStep
 
 from ..config.env_cfgs import resolve_go2_supermimic_cfg
 from ..go_supermimic_env_cfg import make_go2_supermimic_env_cfg
 from ..mdp.curriculums import CommandCurriculum, TerrainCurriculum
 from ..mdp.state_spec import (
-    ACTION_DIM, COMMAND_TIMER, CONTEXT_DIM, CONTEXT_ENCODER_BIAS, CONTEXT_FRICTION,
-    CONTEXT_EXTEROCEPTIVE_MASK, CONTEXT_ORIGIN, CONTEXT_RANGES, CONTEXT_ZERO_PROBABILITY, JOINT_NAMES,
+    CONTEXT_DIM, CONTEXT_ENCODER_BIAS, CONTEXT_FRICTION,
+    CONTEXT_EXTEROCEPTIVE_MASK, CONTEXT_ORIGIN, CONTEXT_RANGES, CONTEXT_ZERO_PROBABILITY,
     COMMAND_OVERRIDE,
 )
 from ..mdp.reference_task import Go2ReferenceTaskModel
@@ -48,22 +50,18 @@ class Go2TransitionAdapter:
             env_cfg.viewer.height = video_height
         if video_width is not None:
             env_cfg.viewer.width = video_width
-        self.raw_env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
-        try:
-            self.device = next(iter(self.raw_env.scene.entities.values())).data.joint_pos.device
-            self.num_envs = self.raw_env.num_envs
+        with ExitStack() as cleanup:
+            self.raw_env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
+            cleanup.callback(self.raw_env.close)
             self.robot = self.raw_env.scene["robot"]
-            if tuple(self.robot.joint_names) != JOINT_NAMES:
-                raise ValueError("Go2 asset joint order differs from the task specification")
-            action = self.raw_env.action_manager.get_term("joint_pos")
-            if tuple(action.target_names) != JOINT_NAMES:
-                raise ValueError("Go2 action order differs from the task specification")
+            self.device = self.robot.data.joint_pos.device
+            self.num_envs = self.raw_env.num_envs
             terrain = self.raw_env.scene.terrain
             self.map.bind(terrain.terrain_origins)
             self.surface = (PlaneSurface(device=self.device) if self.cfg.terrain.mode == "flat" else
                             TerrainSurface.from_model(self.raw_env.sim.mj_model, self.device, terrain_map=self.map))
             self.task = Go2ReferenceTaskModel(self.cfg, self.robot.data.default_joint_pos[0].clone(),
-                                  self.robot.data.soft_joint_pos_limits[0].clone(), self.surface, device=self.device)
+                                             self.robot.data.soft_joint_pos_limits[0].clone(), self.surface, device=self.device)
             self.task.bind_env(self.raw_env)
             self.command_curriculum = CommandCurriculum(self.cfg.commands, self.map.family_names, self.device)
             self.terrain_curriculum = TerrainCurriculum(
@@ -77,14 +75,11 @@ class Go2TransitionAdapter:
             self.terrain_half_size = torch.tensor(
                 (self.map.rows * self.map.size[0] / 2 + 4., self.map.cols * self.map.size[1] / 2 + 4.), device=self.device)
             self.context_version = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-            self._state = None
             self._play_commands = None
             self.last_metrics = {}
             self._episode_reward_sums = {name: torch.zeros(self.num_envs, device=self.device)
                                          for name in self.cfg.to_dict()["reward"]["scales"]}
-        except BaseException:
-            self.raw_env.close()
-            raise
+            cleanup.pop_all()
 
     @property
     def step_dt(self):
@@ -92,29 +87,25 @@ class Go2TransitionAdapter:
 
     def get_state(self):
         """提供当前决策态的独立副本，避免评估修改采集状态。"""
-        if self._state is None:
-            raise RuntimeError("Reset the Go2 adapter before reading its state")
         return self._state.detached_clone()
 
     @torch.no_grad()
     def set_play_commands(self, commands=None):
-        """播放时固定各环境的速度命令，None恢复原命令采样；不改变训练配置。"""
-        if not self.play:
-            raise RuntimeError("Command overrides are available only during playback")
+        """在播放重置后固定各环境的速度命令；None 恢复原命令采样。"""
+        state = self._state
         if commands is None:
             self._play_commands = None
-            if self._state is not None:
-                self._state.memory[:, COMMAND_OVERRIDE] = 0
+            state.memory[:, COMMAND_OVERRIDE] = 0
             return
         values = torch.as_tensor(commands, dtype=torch.float32, device=self.device)
         if values.shape == (3,):
             values = values.unsqueeze(0).expand(self.num_envs, -1)
-        if values.shape != (self.num_envs, 3) or not torch.isfinite(values).all():
-            raise ValueError("Playback commands must be finite [3] or [num_envs,3]")
-        self._play_commands = values.clone()
-        if self._state is not None:
-            self._state.command.copy_(self._play_commands)
-            self._state.memory[:, COMMAND_OVERRIDE] = 1
+        elif values.shape != state.command.shape:
+            raise ValueError("Playback commands must have shape [3] or [num_envs, 3]")
+        values = values.clone()
+        state.command.copy_(values)
+        state.memory[:, COMMAND_OVERRIDE] = 1
+        self._play_commands = values
 
     # ---------- 回合重置 ----------
 
@@ -147,7 +138,7 @@ class Go2TransitionAdapter:
         context[:, CONTEXT_EXTEROCEPTIVE_MASK] = (enabled | ~eligible).float()
         return context
 
-    def _reset_rows(self, ids):
+    def _reset_rows(self, ids, *, full=False):
         self._set_origins(ids)
         self.raw_env.reset(env_ids=ids)
         physical = self.task.read_physical(self.raw_env)
@@ -156,7 +147,7 @@ class Go2TransitionAdapter:
         if self._play_commands is not None:
             reset_state.command.copy_(self._play_commands[ids])
             reset_state.memory[:, COMMAND_OVERRIDE] = 1
-        if self._state is None:
+        if full:
             self._state = reset_state.detached_clone()
         else:
             for name in ("physical", "memory", "command", "context"):
@@ -170,11 +161,9 @@ class Go2TransitionAdapter:
     def reset(self, env_ids=None):
         """外部reset不计晋级，保留已加载的课程阶段与逻辑等级。"""
         ids = torch.arange(self.num_envs, device=self.device) if env_ids is None else env_ids
-        if self._state is None and env_ids is not None:
-            raise RuntimeError("Initialize all environments before a partial reset")
         if ids.numel() == 0:
             return self._state.detached_clone()
-        self._reset_rows(ids)
+        self._reset_rows(ids, full=env_ids is None)
         self.last_metrics = {}
         return self._state.detached_clone()
 
@@ -182,18 +171,10 @@ class Go2TransitionAdapter:
 
     @torch.no_grad()
     def step(self, actions):
-        if self._state is None:
-            raise RuntimeError("Reset the Go2 adapter before stepping")
-        if actions.shape != (self.num_envs, ACTION_DIM) or actions.dtype != torch.float32 or actions.device != self.device:
-            raise ValueError("Go2 actions must be float32 [N,12] on the environment device")
-        if not torch.isfinite(actions).all():
-            raise FloatingPointError("Go2 actions contain non-finite values")
         before = self._state.detached_clone()
         versions = self.context_version.clone()
         _, _, _, raw_truncated, _ = self.raw_env.step(actions)
         physical = self.task.read_physical(self.raw_env).clone()
-        if not torch.isfinite(physical).all():
-            raise FloatingPointError("Go2 physical state contains non-finite values")
         contact_sensor = self.raw_env.scene["feet_ground_contact"]
         sensor = contact_sensor.data
         final = self.task.advance(before, actions, physical,

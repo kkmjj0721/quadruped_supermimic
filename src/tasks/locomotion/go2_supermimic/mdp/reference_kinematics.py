@@ -29,31 +29,19 @@ class Go2Kinematics(nn.Module):
         mj_to_local = {}
         for body in range(1, model.nbody):
             name = model.body(body).name
-            if model.body_jntnum[body] != 1:
-                raise ValueError(f"Go2 FK requires exactly one joint per body: {name}")
             joint = int(model.body_jntadr[body])
             if model.jnt_type[joint] == mujoco.mjtJoint.mjJNT_FREE:
-                if name != "base" or model.body_parentid[body] != 0 or bodies:
-                    raise ValueError("Go2 FK requires a single free base before the leg joints")
                 parents.append(-1)
                 joints.append(-1)
             else:
-                joint_name = model.joint(joint).name
-                if (model.jnt_type[joint] != mujoco.mjtJoint.mjJNT_HINGE or joint_name not in joint_indices
-                        or np.any(model.jnt_pos[joint] != 0) or model.qpos0[model.jnt_qposadr[joint]] != 0):
-                    raise ValueError(f"Go2 FK requires the named zero-anchor, zero-reference hinge: {joint_name}")
                 parent = int(model.body_parentid[body])
-                if parent not in mj_to_local:
-                    raise ValueError(f"Go2 FK requires a preceding moving parent: {name}")
                 parents.append(mj_to_local[parent])
-                joints.append(joint_indices[joint_name])
+                joints.append(joint_indices[model.joint(joint).name])
             mj_to_local[body] = len(bodies)
             bodies.append(name)
             axes.append(model.jnt_axis[joint].copy())
             offsets.append(model.body_pos[body].copy())
             rotations.append(model.body_quat[body].copy())
-        if sorted(joint for joint in joints if joint >= 0) != list(range(len(JOINT_NAMES))):
-            raise ValueError("Go2 FK joint set differs from the task joint order")
         self.parents, self.joints = tuple(parents), tuple(joints)
         self.num_bodies = len(bodies)
         self.limb_indices = tuple(bodies.index(f"{leg}_{link}") for link in ("thigh", "calf") for leg in FOOT_NAMES)

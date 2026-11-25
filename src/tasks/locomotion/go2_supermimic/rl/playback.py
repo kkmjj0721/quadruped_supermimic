@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from copy import deepcopy
 from pathlib import Path
 
@@ -210,17 +211,7 @@ def _restore_curriculum(adapter, checkpoint):
     saved = checkpoint["go2_task"]["curriculum"]
     terrain = saved["terrain"]
     families, levels = terrain["family_ids"], terrain["levels"]
-    if (not isinstance(families, torch.Tensor) or not isinstance(levels, torch.Tensor)
-            or families.ndim != 1 or families.numel() == 0 or levels.shape != families.shape
-            or families.dtype != torch.long or levels.dtype != torch.long):
-        raise ValueError("Invalid saved terrain curriculum tensors")
-    counts = torch.tensor(adapter.map.level_counts, dtype=torch.long, device=families.device)
-    if (families < 0).any() or (families >= counts.numel()).any():
-        raise ValueError("Invalid saved terrain family IDs")
-    if (levels < 0).any() or (levels >= counts[families]).any():
-        raise ValueError("Invalid saved terrain levels")
     rows = torch.arange(adapter.num_envs, device=families.device) % families.numel()
-    adapter.terrain_curriculum.family_ids.copy_(families[rows].to(adapter.device))
     adapter.load_curriculum_state_dict({
         "command": saved["command"],
         "terrain": {**terrain, "family_ids": families[rows], "levels": levels[rows]},
@@ -228,64 +219,44 @@ def _restore_curriculum(adapter, checkpoint):
 
 
 def make_playback(task_id, *, checkpoint_file=None, agent="trained", num_envs=None, device="cpu",
-                  render_mode=None, video_height=None, video_width=None, no_terminations=False):
-    """返回已重置的播放环境与确定性高程教师策略，不创建训练组件。"""
-    if task_id not in TASK_MODES:
-        raise ValueError(f"Unknown Go2 SuperMimic task: {task_id}")
-    if agent not in ("trained", "zero", "random"):
-        raise ValueError(f"Unsupported agent mode: {agent}")
-    source = load_playback_source(task_id, checkpoint_file) if agent == "trained" else None
+                  render_mode=None, video=False, video_length=200, video_height=None, video_width=None,
+                  no_terminations=False):
+    """装配并重置播放环境与策略，按需包装录像，不创建训练组件。"""
+    trained = agent == "trained"
+    sampler = None if trained else {"zero": torch.zeros, "random": torch.rand}[agent]
+    checkpoint = Path(checkpoint_file).expanduser().resolve() if trained else None
+    record_video = video and trained
+    if video and not trained:
+        print("[WARN] Video recording with dummy agents is disabled (no checkpoint/log_dir).")
+    source = load_playback_source(task_id, checkpoint) if trained else None
     cfg = deepcopy(source.cfg) if source is not None else Go2ReferenceCfg()
     cfg.terrain.mode = TASK_MODES[task_id]
     cfg.env.num_envs = num_envs if num_envs is not None else 1
     torch.manual_seed(cfg.env.seed)
     adapter = _PlaybackTransitionAdapter(
-        cfg, device=device, play=True, render_mode=render_mode, video_height=video_height,
+        cfg, device=device, play=True, render_mode="rgb_array" if record_video else render_mode, video_height=video_height,
         video_width=video_width, no_terminations=no_terminations,
     )
-    try:
-        model = build_playback_policy(source, adapter) if source is not None else None
-        if source is not None:
+    with ExitStack() as cleanup:
+        cleanup.callback(adapter.close)
+        model = build_playback_policy(source, adapter) if trained else None
+        if trained:
             _restore_curriculum(adapter, source.checkpoint)
         env = SuperMimicPlayEnv(adapter)
         env.reset()
+        if record_video:
+            env = SuperMimicVideoRecorder(env, video_folder=checkpoint.parent / "videos" / "play",
+                                          step_trigger=lambda step: step == 0,
+                                          video_length=video_length, disable_logger=True)
+            print("[INFO] Recording videos during play.")
+        cleanup.pop_all()
 
-        @torch.no_grad()
-        def policy(observations):
-            if model is not None:
-                return model(observations["history"], observations["heightmap"], observations["exteroceptive_mask"])
-            shape = (adapter.num_envs, adapter.task.spec.action_dim)
-            if agent == "zero":
-                return torch.zeros(shape, device=adapter.device)
-            return 2 * torch.rand(shape, device=adapter.device) - 1
+    @torch.no_grad()
+    def policy(observations):
+        if trained:
+            return model(observations["history"], observations["heightmap"], observations["exteroceptive_mask"])
+        shape = (adapter.num_envs, adapter.task.spec.action_dim)
+        values = sampler(shape, device=adapter.device)
+        return values if agent == "zero" else 2 * values - 1
 
-        return env, policy
-    except BaseException:
-        adapter.close()
-        raise
-
-
-def make_playback_env(task_id, *, checkpoint_file=None, agent="trained", num_envs=None, device="cpu",
-                      video=False, video_length=200, video_height=None, video_width=None,
-                      no_terminations=False):
-    """在播放环境外按需装配录像；录像器不可用时关闭已建环境并继续抛出。"""
-    checkpoint = Path(checkpoint_file).expanduser().resolve() if checkpoint_file is not None else None
-    record_video = checkpoint is not None and video
-    if video and checkpoint is None:
-        print("[WARN] Video recording with dummy agents is disabled (no checkpoint/log_dir).")
-    env, policy = make_playback(
-        task_id, checkpoint_file=checkpoint, agent=agent, num_envs=num_envs, device=device,
-        render_mode="rgb_array" if record_video else None, video_height=video_height,
-        video_width=video_width, no_terminations=no_terminations,
-    )
-    if not record_video:
-        return env, policy
-    try:
-        recorder = SuperMimicVideoRecorder(env, video_folder=checkpoint.parent / "videos" / "play",
-                                           step_trigger=lambda step: step == 0,
-                                           video_length=video_length, disable_logger=True)
-    except BaseException:
-        env.close()
-        raise
-    print("[INFO] Recording videos during play.")
-    return recorder, policy
+    return env, policy
