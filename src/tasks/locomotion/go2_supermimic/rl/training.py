@@ -14,7 +14,6 @@ import json
 import os
 from pathlib import Path
 import re
-import subprocess
 import sys
 import time
 
@@ -92,21 +91,13 @@ def _resolve_device(requested: str) -> str:
 # ---------- 运行快照与训练装配 ----------
 
 def _run_origin(task_id: str, args: SuperMimicTrainConfig, device: str, resume: Path | None, source: Path | None) -> dict:
-    """收集命令、依赖版本与代码状态，供事件文本和params快照共同使用。"""
-    root = Path(__file__).resolve().parents[5]
-    workspace = {}
-    for name, command in (("revision", ["git", "rev-parse", "HEAD"]),
-                          ("status", ["git", "status", "--short"]),
-                          ("diff", ["git", "diff", "HEAD", "--"])):
-        result = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=10, check=True)
-        workspace[name] = result.stdout if name == "diff" else result.stdout.strip()
+    """记录本次训练的启动参数与运行环境。"""
     return {"task_id": task_id, "started_at": datetime.now().astimezone().isoformat(),
             "arguments": asdict(args), "device": device, "resume_from": resume,
             "task_config_source": source, "command": list(sys.argv), "python": sys.version,
             "torch": torch.__version__,
             "triton_libdevice_path": os.environ.get("TRITON_LIBDEVICE_PATH"),
-            "packages": {name: version(name) for name in ("mjlab", "mujoco", "mujoco-warp", "warp-lang", "tensorboard")},
-            "workspace": workspace}
+            "packages": {name: version(name) for name in ("mjlab", "mujoco", "mujoco-warp", "warp-lang", "tensorboard")}}
 
 
 def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
@@ -157,9 +148,6 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
         origin.update(seed=cfg.env.seed, num_envs=cfg.env.num_envs)
         params = log_dir / "params"
         params.mkdir()
-        diff = origin["workspace"].pop("diff")
-        origin["workspace"]["diff_file"] = "params/git.diff"
-        (params / "git.diff").write_text(diff, encoding="utf-8")
         settings = cfg.to_dict()
         agent = {"algorithm": settings.pop("algorithm"), "config": asdict(runner.config),
                  "execution": asdict(execution), "runner": settings.pop("runner")}
