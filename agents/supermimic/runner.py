@@ -174,7 +174,7 @@ class SuperMimicRunner:
             done = result.terminated | result.truncated
             with self.timing.section("collection_statistics"):
                 self.actor.update_statistics(self.history)
-                self.model.update_stats(self.current, action, result.final_state, mask=~done)
+                self.model.update_stats(self.current, action, result.final_state)
             with self.timing.section("replay_history_write"):
                 self.replay.add(self.current, self.history, action, result)
             with self.timing.section("collection_episodes"):
@@ -269,13 +269,13 @@ class SuperMimicRunner:
         window_started = None
         previous_window = None
         target = max(self.target_iteration, self.iteration + iterations)
-        # 预填使用整数批次且不消耗训练累加器；默认8步窗口仍先采10步。
-        if self.replay.size <= self.config.wm_window + 1:
+        # 独立终态使H步窗口只需H条转移；预填不消耗训练累加器。
+        if not self.replay.ready(self.config.wm_window):
             prefill_started = time.perf_counter()
             prefill_previous_steps = self.real_steps
             prefill_falls = torch.zeros((), device=self.device)
             prefill_reset_steps = torch.zeros((), dtype=torch.long, device=self.device)
-            while self.replay.size <= self.config.wm_window + 1:
+            while not self.replay.ready(self.config.wm_window):
                 metrics = self.collect(int(self.config.collect_steps))
                 prefill_falls += metrics["failures"]
                 prefill_reset_steps += metrics["reset_steps"]

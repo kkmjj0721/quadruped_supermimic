@@ -365,7 +365,7 @@ class Go2ReferenceTaskModel:
         flight = ~contact.any(-1)
         changes = (contact[:, 1:] != contact[:, :-1]).sum(-1)
         hard_motion = physical[..., VELOCITY_HEADING][..., 2].abs() > .6
-        falls = ~window.valid[:, -1]
+        falls = (window.terminated & window.valid).any(-1)
         scores = changes.sum(-1).float() + flight.sum(-1).float() + 4.0 * falls.float()
         worthy = (flight.sum(-1) >= 2) | hard_motion.any(-1) | falls
         return scores, worthy
