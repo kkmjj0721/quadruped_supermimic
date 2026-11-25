@@ -17,10 +17,12 @@ import numpy as np
 import torch
 from mjlab.terrains import TerrainEntityCfg, TerrainGeneratorCfg
 
+from .stepping_stones import SteppingStonesTerrainCfg
+
 
 def reference_generator(cfg) -> TerrainGeneratorCfg:
     """复用ri_5036_him地形，追加普通地形阶段的正反斜坡与梅花桩。"""
-    from mjlab.terrains import BoxRandomGridTerrainCfg, BoxSteppingStonesTerrainCfg
+    from mjlab.terrains import BoxRandomGridTerrainCfg
     from mjlab.terrains.config import ROUGH_TERRAINS_CFG
 
     terrain = deepcopy(ROUGH_TERRAINS_CFG)
@@ -53,12 +55,12 @@ def reference_generator(cfg) -> TerrainGeneratorCfg:
             border_width=0.10, proportion=0.10,
         )
     # 末尾追加以保留旧地块随机流；归一化后梅花桩占10%，原地形相对比例不变。
-    # 四边各留0.25米平地，内侧7.5米桩区沿用原生平台对齐，保持出口与桩间等缝。
-    terrain.sub_terrains["stepping_stones"] = BoxSteppingStonesTerrainCfg(
+    # 独立递增净间隙，四边各留0.25米平地，平台出口与本档桩间等缝。
+    terrain.sub_terrains["stepping_stones"] = SteppingStonesTerrainCfg(
         proportion=sum(term.proportion for term in terrain.sub_terrains.values()) / 9,
-        stone_size_range=(0.15, 0.30), stone_distance_range=(0.10, 0.25),
-        stone_height=0.10, stone_height_variation=0.02, stone_size_variation=0.0,
-        displacement_range=0.0, floor_depth=0.50, platform_width=2.5, border_width=0.25,
+        stone_size_range=(0.25, 0.35), stone_distance_range=(0.10, 0.15),
+        stone_height=0.10, stone_height_variation=0.02,
+        floor_depth=0.50, platform_width=2.5, border_width=0.25,
     )
     return terrain
 

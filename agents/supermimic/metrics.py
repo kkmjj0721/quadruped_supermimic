@@ -10,7 +10,7 @@ from .compilation import compile_kernel
 
 @lru_cache(maxsize=4)
 def _compiled_accumulator(function, backend):
-    """复用两个无状态累计核心的编译包装，逐轮构造累计器不重复配置Dynamo。"""
+    """复用模型指标累计核的编译包装。"""
     return compile_kernel(function, backend)
 
 
@@ -114,38 +114,25 @@ def _metric_reduction(name):
     return "mean"
 
 
-def _accumulate_metric_columns(values, masks, totals, counts, last, weighted, steps):
-    """固定列布局内融合打包、有效性和累计；FP64输出避免整数先经FP32舍入。"""
-    # 转换必须先于混合类型stack；只指定FP64输出时编译器可能先按FP32提升输入。
-    values = torch.stack(tuple(value.to(torch.float64) for value in values))
-    valid = torch.stack(masks)
-    weights = torch.where(weighted, steps, 1)
-    accepted = torch.where(valid, values, 0)
-    totals.copy_(torch.where(last, accepted, totals + accepted * weights))
-    counts.copy_(torch.where(last, valid, counts + valid * weights))
-
-
 class MetricWindow:
     """设备标量按列累计，主机已有标量留在主机；仅汇总边界由调用方回读。
 
-    可选编译固定布局的打包与累计核心，主机字典和跨轮调度不进入图。
+    设备值按原类型分组打包，再以 FP64 对齐窗口列；列变化只更新索引。
     最近100回合等快照取末轮；缺省和空回合窗口不进入均值分母。
     每轮必须传入主机整数iteration和collection/control_steps。
     同名指标在窗口中固定使用主机数值或同一设备张量，沿用训练循环的来源约定。
     """
 
-    def __init__(self, device, *, compile_backend=None):
+    def __init__(self, device):
         self.device = torch.device(device)
         self._names = []
         self._zeros = {}
-        self._mask_defaults = {}
-        self._accumulate = (_accumulate_metric_columns if compile_backend is None
-                            else _compiled_accumulator(_accumulate_metric_columns, compile_backend))
+        self._column_types = ()
         self._totals = torch.empty(0, dtype=torch.float64, device=self.device)
         self._counts = torch.empty_like(self._totals)
         self._steps = torch.ones(1, dtype=torch.float64, device=self.device)
-        self._true = torch.ones((), dtype=torch.bool, device=self.device)
-        self._false = torch.zeros((), dtype=torch.bool, device=self.device)
+        self._mask_defaults = (torch.zeros((), dtype=torch.bool, device=self.device),
+                               torch.ones((), dtype=torch.bool, device=self.device))
         self.clear()
 
     def __len__(self):
@@ -195,8 +182,6 @@ class MetricWindow:
         if new_names:
             self._names.extend(new_names)
             self._zeros.update((name, torch.zeros_like(device_values[name])) for name in new_names)
-            # 每列视图仅建立一次；对象独立以保持编译输入别名约定，底层标志只读共享。
-            self._mask_defaults.update((name, (self._false.view(()), self._true.view(()))) for name in new_names)
             padding = self._totals.new_zeros(len(new_names))
             self._totals = torch.cat((self._totals, padding))
             self._counts = torch.cat((self._counts, padding))
@@ -208,15 +193,30 @@ class MetricWindow:
             return
         values, masks = [], []
         for name in self._names:
-            # 缺省值沿用该列的形状和dtype，缺省模式变化不会触发布局重编译。
             values.append(device_values.get(name, self._zeros[name]))
             valid = validity.get(name, True) if name in device_values else False
             masks.append(valid.detach().reshape(()) if isinstance(valid, torch.Tensor)
-                         else self._mask_defaults[name][bool(valid)])
-        # 2/3步交替只更新设备值，避免Python步数参与编译值特化。
+                         else self._mask_defaults[bool(valid)])
+
+        # 先按原类型打包再转 FP64，混合 FP32 与大整型时不会丢失整数低位。
+        column_types = tuple(value.dtype for value in values)
+        if column_types != self._column_types:
+            self._column_types = column_types
+            groups = {}
+            for column, dtype in enumerate(column_types):
+                groups.setdefault(dtype, []).append(column)
+            self._groups = list(groups.values())
+            packed_order = [column for group in self._groups for column in group]
+            restore = sorted(range(len(packed_order)), key=packed_order.__getitem__)
+            self._restore_order = torch.tensor(restore, device=self.device)
+        packed = [torch.stack([values[i] for i in group]).double() for group in self._groups]
+        ordered = torch.cat(packed).index_select(0, self._restore_order)
+        valid = torch.stack(masks)
         self._steps.fill_(steps)
-        self._accumulate(tuple(values), tuple(masks), self._totals, self._counts,
-                         self._last, self._weighted, self._steps)
+        weights = torch.where(self._weighted, self._steps, 1)
+        accepted = torch.where(valid, ordered, 0)
+        self._totals.copy_(torch.where(self._last, accepted, self._totals + accepted * weights))
+        self._counts.copy_(torch.where(self._last, valid, self._counts + valid * weights))
 
     def aggregate(self):
         """返回汇总值及有效掩码，不同步设备；空窗口返回两个空映射。"""

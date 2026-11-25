@@ -47,72 +47,77 @@ def write_windows(destination, source, accepted, indices):
 
 
 @triton.jit
-def _sample_archive_or_replay(initial, actions, targets, valid, terminated,
-                             archive_initial, archive_actions, archive_targets, archive_valid, archive_terminated,
-                             replay_states, replay_actions, terminal_states, terminal_indices, replay_terminated,
-                             rows, starts, indices, populated,
-                             STATE: tl.constexpr, ACTION: tl.constexpr, STEPS: tl.constexpr,
-                             SLOTS: tl.constexpr, TERMINALS: tl.constexpr, BLOCK: tl.constexpr, TIME_BLOCK: tl.constexpr):
+def _gather_windows(initial, actions, targets, valid, terminated, replay_states, replay_actions,
+                    terminal_storage, terminal_indices, replay_terminated, rows, starts, archive,
+                    STATE: tl.constexpr, ACTION: tl.constexpr, STEPS: tl.constexpr, SLOTS: tl.constexpr,
+                    ROW_STRIDE: tl.constexpr, START_STRIDE: tl.constexpr, BLOCK: tl.constexpr, TIME_BLOCK: tl.constexpr):
     row = tl.program_id(0)
     columns = tl.arange(0, BLOCK)
     initial_mask = columns < STATE
     action_mask = columns < STEPS * ACTION
     target_mask = columns < STEPS * STATE
-    if tl.load(populated):
-        source = tl.load(indices + row)
-        initial_values = tl.load(archive_initial + source * STATE + columns, initial_mask, other=0)
-        action_values = tl.load(archive_actions + source * STEPS * ACTION + columns, action_mask, other=0)
-        target_values = tl.load(archive_targets + source * STEPS * STATE + columns, target_mask, other=0)
-        archive_step_mask = columns < STEPS
-        archive_valid_values = tl.load(archive_valid + source * STEPS + columns, archive_step_mask, other=0)
-        archive_termination_values = tl.load(archive_terminated + source * STEPS + columns, archive_step_mask, other=0)
-        tl.store(valid + row * STEPS + columns, archive_valid_values, archive_step_mask)
-        tl.store(terminated + row * STEPS + columns, archive_termination_values, archive_step_mask)
-    else:
-        environment = tl.load(rows + row)
-        start = tl.load(starts + row)
-        initial_values = tl.load(replay_states + (environment * SLOTS + start) * STATE + columns,
-                                 initial_mask, other=0)
-        action_slots = (start + columns // ACTION) % SLOTS
-        action_values = tl.load(replay_actions + (environment * SLOTS + action_slots) * ACTION + columns % ACTION,
-                                action_mask, other=0)
-        target_slots = (start + columns // STATE) % SLOTS
-        terminal = tl.load(terminal_indices + environment * SLOTS + target_slots, target_mask, other=-1)
-        ordinary = tl.load(replay_states + (environment * SLOTS + (target_slots + 1) % SLOTS) * STATE + columns % STATE,
-                           target_mask & (terminal < 0), other=0)
-        final = tl.load(terminal_states + (terminal % TERMINALS) * STATE + columns % STATE,
-                        target_mask & (terminal >= 0), other=0)
-        target_values = tl.where(terminal >= 0, final, ordinary)
-        steps = tl.arange(0, TIME_BLOCK)
-        replay_step_mask = steps < STEPS
-        step_slots = (start + steps) % SLOTS
-        ended = (tl.load(terminal_indices + environment * SLOTS + step_slots, replay_step_mask, other=-1) >= 0).to(tl.int32)
-        replay_termination_values = tl.load(replay_terminated + environment * SLOTS + step_slots, replay_step_mask, other=0)
-        # 只检查此前各步是否已结束，当前步的终点仍可监督。
-        replay_valid_values = tl.cumsum(ended) == ended
-        tl.store(valid + row * STEPS + steps, replay_valid_values, replay_step_mask)
-        tl.store(terminated + row * STEPS + steps, replay_termination_values, replay_step_mask)
+    if len(archive):
+        archive_initial, archive_actions, archive_targets, archive_valid, archive_terminated, indices, populated = archive
+        if tl.load(populated):
+            source = tl.load(indices + row)
+            initial_values = tl.load(archive_initial + source * STATE + columns, initial_mask, other=0)
+            action_values = tl.load(archive_actions + source * STEPS * ACTION + columns, action_mask, other=0)
+            target_values = tl.load(archive_targets + source * STEPS * STATE + columns, target_mask, other=0)
+            archive_step_mask = columns < STEPS
+            archive_valid_values = tl.load(archive_valid + source * STEPS + columns, archive_step_mask, other=0)
+            archive_termination_values = tl.load(archive_terminated + source * STEPS + columns, archive_step_mask, other=0)
+            tl.store(valid + row * STEPS + columns, archive_valid_values, archive_step_mask)
+            tl.store(terminated + row * STEPS + columns, archive_termination_values, archive_step_mask)
+            tl.store(initial + row * STATE + columns, initial_values, initial_mask)
+            tl.store(actions + row * STEPS * ACTION + columns, action_values, action_mask)
+            tl.store(targets + row * STEPS * STATE + columns, target_values, target_mask)
+            return
+    environment = tl.load(rows + row * ROW_STRIDE)
+    start = tl.load(starts + row * START_STRIDE)
+    initial_values = tl.load(replay_states + (environment * SLOTS + start) * STATE + columns,
+                             initial_mask, other=0)
+    action_slots = (start + columns // ACTION) % SLOTS
+    action_values = tl.load(replay_actions + (environment * SLOTS + action_slots) * ACTION + columns % ACTION,
+                            action_mask, other=0)
+    target_slots = (start + columns // STATE) % SLOTS
+    terminal = tl.load(terminal_indices + environment * SLOTS + target_slots, target_mask, other=-1)
+    ordinary = tl.load(replay_states + (environment * SLOTS + (target_slots + 1) % SLOTS) * STATE + columns % STATE,
+                       target_mask & (terminal < 0), other=0)
+    terminal_states = tl.load(terminal_storage).to(replay_states.dtype)
+    capacity = tl.load(terminal_storage + 1)
+    final = tl.load(terminal_states + (terminal & (capacity - 1)) * STATE + columns % STATE,
+                    target_mask & (terminal >= 0), other=0)
+    target_values = tl.where(terminal >= 0, final, ordinary)
+    steps = tl.arange(0, TIME_BLOCK)
+    replay_step_mask = steps < STEPS
+    step_slots = (start + steps) % SLOTS
+    ended = (tl.load(terminal_indices + environment * SLOTS + step_slots, replay_step_mask, other=-1) >= 0).to(tl.int32)
+    replay_termination_values = tl.load(replay_terminated + environment * SLOTS + step_slots, replay_step_mask, other=0)
+    # 只检查此前各步是否已结束，当前步的终点仍可监督。
+    replay_valid_values = tl.cumsum(ended) == ended
+    tl.store(valid + row * STEPS + steps, replay_valid_values, replay_step_mask)
+    tl.store(terminated + row * STEPS + steps, replay_termination_values, replay_step_mask)
     tl.store(initial + row * STATE + columns, initial_values, initial_mask)
     tl.store(actions + row * STEPS * ACTION + columns, action_values, action_mask)
     tl.store(targets + row * STEPS * STATE + columns, target_values, target_mask)
 
 
-def sample_archive_or_replay(archive, replay, rows, starts, indices, horizon, populated):
-    """条件只在设备核内求值，两条分支均只读取实际选中的完整窗口。"""
+def gather_windows(replay, rows, starts, horizon, archive=()):
+    """统一读取连续回放或设备选择的归档窗口；普通采样将归档分支静态消去。"""
     from .buffer import Window
 
-    batch, state_width, action_width = rows.shape[0], archive.initial.data.shape[-1], archive.actions.shape[-1]
-    initial = archive.initial.data.new_empty(batch, state_width)
-    actions = archive.actions.new_empty(batch, horizon, action_width)
-    targets = archive.targets.data.new_empty(batch, horizon, state_width)
-    valid = archive.valid.new_empty(batch, horizon)
-    terminated = archive.terminated.new_empty(batch, horizon)
+    states = replay.states.data
+    batch, state_width, action_width = rows.shape[0], states.shape[-1], replay.actions.shape[-1]
+    initial = states.new_empty(batch, state_width)
+    actions = replay.actions.new_empty(batch, horizon, action_width)
+    targets = states.new_empty(batch, horizon, state_width)
+    valid = replay.terminated.new_empty(batch, horizon)
+    terminated = replay.terminated.new_empty(batch, horizon)
     block = triton.next_power_of_2(max(state_width, horizon * action_width, horizon * state_width))
-    _sample_archive_or_replay[(batch,)](
-        initial, actions, targets, valid, terminated,
-        archive.initial.data, archive.actions, archive.targets.data, archive.valid, archive.terminated,
-        replay.states.data, replay.actions, replay.terminal_states, replay.terminal_indices, replay.terminated,
-        rows, starts, indices, populated, state_width, action_width, horizon, replay.slot_count, len(replay.terminal_states),
+    _gather_windows[(batch,)](
+        initial, actions, targets, valid, terminated, states, replay.actions,
+        replay.terminal_storage, replay.terminal_indices, replay.terminated, rows, starts, archive,
+        state_width, action_width, horizon, replay.slot_count, rows.stride(0), starts.stride(0),
         block, triton.next_power_of_2(horizon))
-    return Window(TaskState.from_flat(initial, archive.initial.widths), actions,
-                  TaskState.from_flat(targets, archive.targets.widths), valid, terminated)
+    return Window(TaskState.from_flat(initial, replay.states.widths), actions,
+                  TaskState.from_flat(targets, replay.states.widths), valid, terminated)

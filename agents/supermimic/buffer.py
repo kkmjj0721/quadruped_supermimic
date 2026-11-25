@@ -65,6 +65,10 @@ class Replay:
         self.slot_count = capacity + 1
         self.states = self._state_storage((num_envs, self.slot_count))
         self.terminal_states = self.states.data.new_empty(1, self.states.data.shape[-1])
+        if self.device.type == "cuda":
+            # 采样图只持有描述表地址；扩容后由采集流发布新的池地址和容量。
+            self.terminal_storage = torch.empty(2, dtype=torch.long, device=device)
+            self._publish_terminal_storage(self.terminal_states)
         self.terminal_indices = torch.full((num_envs, self.slot_count), -1, dtype=torch.long, device=device)
         self.terminal_ends = [0] * self.slot_count
         self.terminal_clock = 0
@@ -121,6 +125,10 @@ class Replay:
             self.clock_device.add_(1)
             self.size_device.add_(1).clamp_max_(self.capacity)
 
+    def _publish_terminal_storage(self, storage):
+        self.terminal_storage[0].fill_(storage.data_ptr())
+        self.terminal_storage[1].fill_(len(storage))
+
     def _store_terminal_states(self, slot, rows, final):
         """连续步共用下一决策态，仅对重置分岔的行分配独立的全精度目标。"""
         first = self.terminal_ends[slot]
@@ -131,6 +139,10 @@ class Replay:
             storage = self.terminal_states.new_empty(capacity, self.terminal_states.shape[-1])
             live = torch.arange(first, self.terminal_clock, device=self.device)
             storage[live % capacity] = self.terminal_states[live % old_capacity]
+            if self.device.type == "cuda":
+                # 读者与写者沿用回放的流顺序。异流扩容时，旧池须活到本次迁移完成。
+                self.terminal_states.record_stream(torch.cuda.current_stream(self.device))
+                self._publish_terminal_storage(storage)
             self.terminal_states = storage
         ids = torch.arange(self.terminal_clock, end, device=self.device)
         self.terminal_indices[:, slot].fill_(-1)
@@ -182,6 +194,10 @@ class Replay:
 
     def gather_windows(self, rows: Tensor, starts: Tensor, horizon: int) -> Window:
         """按既定环境与时间索引读取窗口，不再消费随机数。"""
+        if self.device.type == "cuda":
+            from .archive_kernels import gather_windows
+
+            return gather_windows(self, rows, starts, horizon)
         slots = (starts[:, None] + torch.arange(horizon, device=self.device)) % self.slot_count
         terminal = self.terminal_indices[rows[:, None], slots]
         done = terminal >= 0
@@ -257,7 +273,10 @@ class WindowArchive:
             return replay.gather_windows(rows, starts, horizon)
         indices = self._sample_indices(rows.shape[0])
         if self.size.device.type == "cuda":
-            from .archive_kernels import sample_archive_or_replay
+            from .archive_kernels import gather_windows
 
-            return sample_archive_or_replay(self.storage, replay, rows, starts, indices, horizon, populated)
+            window = self.storage
+            archive = (window.initial.data, window.actions, window.targets.data, window.valid,
+                       window.terminated, indices, populated)
+            return gather_windows(replay, rows, starts, horizon, archive)
         return self.storage.index(indices) if bool(populated) else replay.gather_windows(rows, starts, horizon)
