@@ -83,8 +83,7 @@ def validate_config(cfg) -> None:
         raise ValueError("Control decimation must be a positive integer")
     for name, value in (("episode_length_s", cfg.env.episode_length_s), ("timestep", cfg.sim.timestep),
                         ("tracking_linear_variance", cfg.reward.tracking_linear_variance),
-                        ("tracking_angular_variance", cfg.reward.tracking_angular_variance),
-                        ("fall_softness_deg", cfg.reward.fall_softness_deg)):
+                        ("tracking_angular_variance", cfg.reward.tracking_angular_variance)):
         if value <= 0:
             raise ValueError(f"Task parameter must be positive and finite: {name}")
     if not 0 < cfg.reward.fall_angle < math.pi:

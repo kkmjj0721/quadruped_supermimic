@@ -6,7 +6,10 @@ from torch.nn import functional as F
 
 from agents.supermimic.world_model import RunningNorm, WorldModel
 
-from ..mdp.reference_state import CONTACT_EVENTS, GENERALIZED_DELTA_DIM, MODEL_CONTACT, MODEL_EVENTS, MODEL_HISTORY_CONTACT
+from ..mdp.reference_state import (
+    CONTACT_EVENTS, FOOT_CONTACT, FOOT_HISTORY_CONTACT, GENERALIZED_DELTA_DIM, MODEL_CONTACT, MODEL_EVENTS,
+    MODEL_HISTORY_CONTACT,
+)
 
 
 class Go2WorldModel(WorldModel):
@@ -41,10 +44,14 @@ class Go2WorldModel(WorldModel):
         core = torch.maximum((self.increment_norm.var[:GENERALIZED_DELTA_DIM] + 1e-8).sqrt(), self.core_error_floor)
         return torch.cat((core, scale[GENERALIZED_DELTA_DIM:]), -1)
 
-    def supervised_loss(self, current, predicted, target, recorded_current, delta, scale):
-        """物理量保留原97维MSE，新增五项真实事件以未加类别权重的BCE监督。"""
-        error = self.task.model_error(current, predicted, target, recorded_current)[:, :MODEL_EVENTS.start]
-        regression = (error / scale[:MODEL_EVENTS.start]).square().mean(-1)
+    def supervised_loss(self, predicted, target, delta, scale):
+        """连续物理量用标准化均方误差，瞬时／历史足接触各占半份BCE，绊脚与小腿事件占一份。"""
+        error = self.task.model_error(predicted, target) / scale
+        continuous = torch.cat((error[:, :MODEL_CONTACT.start], error[:, MODEL_CONTACT.stop:MODEL_HISTORY_CONTACT.start]), -1)
+        contact_logits = torch.cat((delta[:, MODEL_CONTACT], delta[:, MODEL_HISTORY_CONTACT]), -1)
+        contact_labels = torch.cat((target.physical[:, FOOT_CONTACT], target.physical[:, FOOT_HISTORY_CONTACT]), -1)
+        # TGI 的瞬时接触 BCE 权重为 0.5；Go2 另用相同权重监督历史接触，两组各四维。
+        contacts = F.binary_cross_entropy_with_logits(contact_logits, contact_labels, reduction="none").mean(-1)
         events = F.binary_cross_entropy_with_logits(
             delta[:, MODEL_EVENTS], target.physical[:, CONTACT_EVENTS], reduction="none").mean(-1)
-        return regression + events
+        return continuous.square().mean(-1) + contacts + events

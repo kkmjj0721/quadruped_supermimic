@@ -185,6 +185,7 @@ class Learner:
                     values = {"control_loss": control_loss.detach(), "velocity_loss": velocity_loss.detach(),
                               "actor_loss": loss.detach(),
                               "imagination/survival_h": data.survival.detach().mean(),
+                              "imagination/unsupported_touchdown_fraction": data.unsupported_touchdowns.float().mean(),
                               "imagination/discounted_reward": data.discounted_reward.detach().mean(),
                               "imagination/bootstrap": data.bootstrap.detach().mean(),
                               "imagination/reward": data.rewards.mean()}

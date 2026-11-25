@@ -37,16 +37,16 @@ def make_go2_supermimic_env_cfg(
         ContactSensorCfg(
             name="feet_ground_contact", primary=ContactMatch(mode="geom", pattern=feet, entity="robot"),
             secondary=ContactMatch(mode="body", pattern="terrain"), fields=("found", "force"),
-            reduce="netforce", num_slots=1, track_air_time=True, history_length=3,
+            reduce="netforce", num_slots=1, history_length=cfg.control.decimation,
         ),
         ContactSensorCfg(
             name="calf_ground_contact",
             primary=ContactMatch(mode="geom", pattern=r"^(FR|FL|RR|RL)_calf_collision\d*$", entity="robot"),
-            fields=("force",), reduce="netforce", num_slots=1, history_length=3,
+            fields=("force",), reduce="netforce", num_slots=1, history_length=cfg.control.decimation,
         ),
         ContactSensorCfg(
             name="base_ground_contact", primary=ContactMatch(mode="body", pattern="base", entity="robot"),
-            fields=("force",), reduce="netforce", num_slots=1, history_length=3,
+            fields=("force",), reduce="netforce", num_slots=1, history_length=cfg.control.decimation,
         ),
     )
     scene = SceneCfg(

@@ -15,9 +15,7 @@
 
 `policy.py`仅保留`ProofTeacherActor`，不保留旧MoE路径。外部历史是逐帧旧到新，内部显式重排为作者逐观测项历史；高程只提供当前162点。`encode`的前三维速度由真实回放同一时刻标签监督，梯度与想象目标共同更新本体编码器；不使用想象速度作为监督标签。
 
-世界模型输入346维，输出102维；其中原97维学习物理转移，新增5维学习任意足绊脚与四条小腿接触事件，不学习总奖励头。保留现有记录pose地形起伏的监督协议、FP16舍入与预测高度回喂。actor想象按预测pose查询当前地图并保留地形导数；critic沿用原有地形起伏停止梯度、机身高度保留导数的约定。这些是本项目SuperMimic适配，并非PROOF PPO中的原有机制。
-
-真实接触由MjLab子步传感器记录；想象使用监督接触概率及已有最大持续耦合计时，last-air/last-contact及落地概率用于作者奖励。任意足绊脚和四条小腿接触在真实端按官方阈值生成标签，新增logit采用未加类别权重的BCE监督，想象奖励读取其概率，不再阈值判定回归接触力。这是可微近似，不宣称是接触事件的无偏期望。新模型与部署格式分别为`supermimic_proof_teacher_v2`与`supermimic_proof_teacher_policy_v1`，加载严格校验，旧MoE格式不兼容。
+地形接触、终止帧监督与落脚回报依据 [TGI a64be1f](https://github.com/leggedrobotics/terrain-grounded-imagination/tree/a64be1f185110d21c680ca1baf66e436772801bc) 的 `tgi/src/tgi/{mdp,world_model,training}` 实现。Go2 使用本机碰撞体和四个球足确定采样位置，保留其速度任务与真实 5 N 机身碰撞判据。回放、网络规格、损失与终止语义见[算法与任务说明](../README.md)。
 
 PROOF及Z_RL原始BSD许可分别保留在 [LICENSE_proof](LICENSE_proof) 与 [LICENSE_z_rl](LICENSE_z_rl)。原世界模型／优化器的MIT许可继续保留如下。
 
@@ -26,6 +24,7 @@ PROOF及Z_RL原始BSD许可分别保留在 [LICENSE_proof](LICENSE_proof) 与 [L
 ```text
 MIT License
 
+Copyright (c) 2026 ETH Zurich (Terrain-Grounded Imagination)
 Copyright (c) 2026 PartyMimic authors
 Copyright (c) 2026 Fuyi Chen (BlinkMimic, from which this software is derived)
 Copyright (c) 2026 Huy-Quang-Dao (InstantTrack, from which BlinkMimic is derived)

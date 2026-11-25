@@ -21,7 +21,7 @@ class ImaginedData:
     survival: Tensor
     discounted_reward: Tensor
     bootstrap: Tensor
-    survivals: Tensor
+    unsupported_touchdowns: Tensor
     initial_velocity: Tensor
 
 
@@ -36,37 +36,41 @@ class Imagination:
     def _step(self, state: TaskState, history: Tensor):
         action, velocity = self.actor.action_and_velocity(
             history, self.task.actor_heightmap(state), self.task.actor_mask(state))
-        with torch.no_grad():
-            features = self.task.privileged(state)
         predicted = self.model(state, action)
         failure = self.task.soft_termination(predicted)
         reward = self.task.reward(state, action, predicted, failure)
+        with torch.no_grad():
+            cut = self.task.unsupported_touchdown(state, predicted)
         frame = self.task.observe(predicted, noisy=True)
-        return predicted, append_history(history, frame), reward, failure, features, velocity
+        return predicted, append_history(history, frame), reward, failure, self.task.privileged(predicted), cut, velocity
 
     def rollout(self, seed) -> ImaginedData:
         cfg = self.config
         state, history = seed.state, seed.history
-        survival = torch.ones(history.shape[0], device=history.device)
-        discounted = torch.zeros_like(survival)
-        rewards, failures, features, survivals = [], [], [], []
+        initial_feature = self.task.privileged(state).detach()
+        rewards, failures, features, cuts = [], [], [], []
         for step in range(cfg.horizon):
-            survivals.append(survival)
-            state, history, reward, failure, feature, velocity = self.step(state, history)
+            state, history, reward, failure, feature, cut, velocity = self.step(state, history)
             if step == 0:
                 initial_velocity = velocity
-            discounted = discounted + cfg.gamma ** step * survival * reward
-            survival = survival * (1 - failure)
-            rewards.append(reward.detach())
-            failures.append(failure.detach())
-            features.append(feature.detach())
-        endpoint = self.task.privileged(state)
-        bootstrap = cfg.gamma ** cfg.horizon * survival * self.critic(endpoint)
-        features.append(endpoint.detach())
-        survivals.append(survival)
-        return ImaginedData(discounted + bootstrap, torch.stack(rewards, dim=1), torch.stack(failures, dim=1),
-                            torch.stack(features, dim=1), survival, discounted, bootstrap,
-                            torch.stack(survivals, dim=1).detach(), initial_velocity)
+            rewards.append(reward)
+            failures.append(failure)
+            features.append(feature)
+            cuts.append(cut)
+        features = torch.stack(features, dim=1)
+        values = self.critic(features)
+        # 末步或支撑不足的落脚步保留即时奖励，后续价值由当前落脚后的状态给出。
+        discounted = rewards[-1]
+        bootstrap = cfg.gamma * (1 - failures[-1]) * values[:, -1]
+        for step in reversed(range(cfg.horizon - 1)):
+            continuation = cfg.gamma * (1 - failures[step])
+            discounted = rewards[step] + continuation * torch.where(cuts[step], 0., discounted)
+            bootstrap = continuation * torch.where(cuts[step], values[:, step], bootstrap)
+        failures = torch.stack(failures, dim=1).detach()
+        critic_features = torch.cat((initial_feature[:, None], features.detach()), dim=1)
+        return ImaginedData(discounted + bootstrap, torch.stack(rewards, dim=1).detach(), failures,
+                            critic_features, (1 - failures).prod(dim=1), discounted, bootstrap,
+                            torch.stack(cuts, dim=1), initial_velocity)
 
     @torch.no_grad()
     def lambda_returns(self, data: ImaginedData) -> Tensor:
@@ -74,12 +78,12 @@ class Imagination:
 
     @torch.no_grad()
     def _lambda_returns(self, data: ImaginedData) -> Tensor:
-        """固定价值快照；按参考对累计存活做比值，保留其低存活数值语义。"""
+        """按 TGI 的逐步生存率生成价值目标；落脚截断只影响策略目标。"""
         values = self.critic(data.features)
         targets = torch.empty_like(data.rewards)
         tail = values[:, -1]
         for step in reversed(range(self.config.horizon)):
-            continuation = data.survivals[:, step + 1] / data.survivals[:, step].clamp_min(1e-6)
+            continuation = 1 - data.failures[:, step]
             tail = data.rewards[:, step] + self.config.gamma * continuation * (
                 (1 - self.config.lam) * values[:, step + 1] + self.config.lam * tail)
             targets[:, step] = tail

@@ -115,11 +115,15 @@ class SuperMimicRunner:
 
             self._model_training = CapturedUpdate(self._fit_models, self.device)
             self._policy_graph_generation = self.learner.graph_generation
-            self._model_graph_generation = self.learner.model_graph_generation
+            self._model_graph_generation = self._model_storage_version()
         self._collection_policy = (compile_kernel(self.actor, self.config.compile_backend)
                                    if self.config.compile_imagination else self.actor)
         self._collection_update = (compile_kernel(self._advance_collection, self.config.compile_backend)
                                    if self.config.compile_imagination else self._advance_collection)
+
+    def _model_storage_version(self):
+        """优化器恢复或结束态环扩容时，采样更新图需重新绑定存储。"""
+        return self.learner.model_graph_generation, len(self.replay.terminal_states)
 
     def _fit_models(self):
         """将整轮采样、全部世界模型更新与设备指标累计留在同一计算链。"""
@@ -132,11 +136,11 @@ class SuperMimicRunner:
     def fit_model_updates(self):
         with self.timing.section("wm_sampling_update"):
             if self.execution.cuda_graph:
-                if self._model_graph_generation != self.learner.model_graph_generation:
+                if self._model_graph_generation != self._model_storage_version():
                     from .cuda_graph import CapturedUpdate
 
                     self._model_training = CapturedUpdate(self._fit_models, self.device)
-                    self._model_graph_generation = self.learner.model_graph_generation
+                    self._model_graph_generation = self._model_storage_version()
                 metrics = self._model_training()
                 metrics = {**metrics, "cuda_graph/model_captured": float(self._model_training.graph is not None),
                            "cuda_graph/model_replays": self._model_training.replays}
@@ -167,7 +171,7 @@ class SuperMimicRunner:
         if not self.execution.cuda_graph:
             return False
         return (self._model_training.graph is None
-                or self._model_graph_generation != self.learner.model_graph_generation or control_requested and (
+                or self._model_graph_generation != self._model_storage_version() or control_requested and (
             self._policy_graph_generation != self.learner.graph_generation
             or freeze_actor not in self._policy_training or self._policy_training[freeze_actor].graph is None))
 
@@ -255,7 +259,7 @@ class SuperMimicRunner:
         """编译统计与历史推进，env.step与回放环的主机游标留在调用方。"""
         self.actor.update_statistics(history)
         done = result.terminated | result.truncated
-        self.model.update_stats(state, action, result.final_state, mask=~done)
+        self.model.update_stats(state, action, result.final_state)
         self.episode_returns.add_(result.reward)
         self.episode_lengths.add_(1)
         self.completed_episodes.append(self.episode_returns, self.episode_lengths, done)
@@ -328,14 +332,16 @@ class SuperMimicRunner:
         window_started = None
         previous_window = None
         target = max(self.target_iteration, self.iteration + iterations)
-        # 预填使用整数批次且不消耗训练累加器；默认8步窗口仍先采10步。
-        if self.replay.size <= self.config.wm_window + 1:
+        # 预填使用整数批次且不消耗训练累加器；满环时至多保留 capacity 步。
+        prefill_target = min(self.config.wm_window + 2, self.replay.capacity)
+        if self.replay.size < prefill_target:
             prefill_started = time.perf_counter()
             prefill_previous_steps = self.real_steps
             prefill_falls = torch.zeros((), device=self.device)
             prefill_reset_steps = torch.zeros((), dtype=torch.long, device=self.device)
-            while self.replay.size <= self.config.wm_window + 1:
-                metrics = self.collect(int(self.config.collect_steps))
+            while self.replay.size < prefill_target:
+                steps = min(max(1, int(self.config.collect_steps)), prefill_target - self.replay.size)
+                metrics = self.collect(steps)
                 prefill_falls += metrics["failures"]
                 prefill_reset_steps += metrics["reset_steps"]
             prefill = read_metrics({"failures": prefill_falls, "reset_steps": prefill_reset_steps}, self.device)

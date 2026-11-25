@@ -4,7 +4,7 @@
 import torch
 
 from .reference_state import (
-    ANGULAR_BODY, CALF_CONTACT_EVENT, COMPUTED_TORQUE, CONTACT_FOUND, FOOT_HISTORY_CONTACT,
+    ANGULAR_BODY, CALF_CONTACT_EVENT, COMPUTED_TORQUE, FOOT_CONTACT, FOOT_HISTORY_CONTACT,
     FOOT_VELOCITY_XY, JOINT_ACCELERATION, JOINT_OFFSET, JOINT_TORQUE, JOINT_VELOCITY, STUMBLE_EVENT,
     normalized_gravity,
 )
@@ -84,7 +84,7 @@ def reference_reward_terms(task, state, action, next_state, failure):
         "stand_still": joint_offset.square().sum(-1) * ~moving,
         "pose": posture_reward(task, state, next_state),
         "stand_still_joint_vel_l2": physical[:, JOINT_VELOCITY].square().sum(-1) * standing,
-        "foot_slip": (foot_speed_squared * physical[:, CONTACT_FOUND]).sum(-1)
+        "foot_slip": (foot_speed_squared * physical[:, FOOT_CONTACT]).sum(-1)
                      * (command_magnitude > cfg.foot_slip_command_threshold),
         "joint_hip_deviation_l2": joint_offset[:, ::3].square().sum(-1),
         "joint_deviation_l2": joint_offset.square().sum(-1),

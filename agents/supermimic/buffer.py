@@ -23,7 +23,7 @@ class Seed:
 
 @dataclass
 class Window:
-    """批次优先；目标取下一slot，终止当步的reset后状态仅供参考稀有事件判定。"""
+    """按批次保存真实转移；重置前终点参与监督，首次结束之后的转移无效。"""
 
     initial: TaskState
     actions: Tensor
@@ -61,27 +61,33 @@ class Replay:
             # 图重放读取稳定地址的当前边界；主机计数仍供写入和就绪检查使用。
             self.size_device = torch.zeros((), dtype=torch.long, device=device)
             self.clock_device = torch.zeros_like(self.size_device)
-        self.states = self._state_storage((num_envs, capacity))
-        self.actions = torch.zeros(num_envs, capacity, spec.action_dim, device=device)
+        # 多一个槽保存最新决策态，满环仍可抽取最后一步的完整转移。
+        self.slot_count = capacity + 1
+        self.states = self._state_storage((num_envs, self.slot_count))
+        self.terminal_states = self.states.data.new_empty(1, self.states.data.shape[-1])
+        self.terminal_indices = torch.full((num_envs, self.slot_count), -1, dtype=torch.long, device=device)
+        self.terminal_ends = [0] * self.slot_count
+        self.terminal_clock = 0
+        self.actions = torch.zeros(num_envs, self.slot_count, spec.action_dim, device=device)
         if history_storage == "full":
-            self.histories = torch.zeros(num_envs, capacity, spec.history_length, spec.observation_dim,
+            self.histories = torch.zeros(num_envs, self.slot_count, spec.history_length, spec.observation_dim,
                                          device=device, dtype=torch.float16)
         else:
             self.frame_capacity = capacity + spec.history_length - 1
             self.observation_frames = torch.zeros(num_envs, self.frame_capacity, spec.observation_dim,
                                                   device=device, dtype=torch.float16)
-            self.history_depth = torch.zeros(num_envs, capacity, device=device, dtype=torch.int32)
+            self.history_depth = torch.zeros(num_envs, self.slot_count, device=device, dtype=torch.int32)
             self.next_history_depth = torch.full((num_envs,), spec.history_length, device=device, dtype=torch.int32)
             self.history_offsets = torch.arange(spec.history_length - 1, -1, -1, device=device)
-        self.done = torch.zeros(num_envs, capacity, device=device, dtype=torch.bool)
-        self.terminated = torch.zeros_like(self.done)
+        self.terminated = torch.zeros(num_envs, self.slot_count, device=device, dtype=torch.bool)
 
     def _state_storage(self, shape):
         widths = (self.spec.state_dim, self.spec.memory_dim, self.spec.command_dim, self.spec.context_dim)
         return TaskState.from_flat(torch.zeros(*shape, sum(widths), device=self.device), widths)
 
     def clear(self):
-        self.size = self.clock = 0
+        self.size = self.clock = self.terminal_clock = 0
+        self.terminal_ends = [0] * self.slot_count
         if self.device_sampling:
             self.size_device.zero_()
             self.clock_device.zero_()
@@ -91,10 +97,12 @@ class Replay:
 
     @torch.no_grad()
     def add(self, state: TaskState, history: Tensor, action: Tensor, result):
-        slot = self.clock % self.capacity
+        slot = self.clock % self.slot_count
         self.states.data[:, slot].copy_(state.data)
+        self.states.data[:, (slot + 1) % self.slot_count].copy_(result.next_state.data)
         self.actions[:, slot].copy_(action)
-        self.done[:, slot].copy_(result.terminated | result.truncated)
+        done = result.terminated | result.truncated
+        self._store_terminal_states(slot, result.done_ids, result.final_state)
         self.terminated[:, slot].copy_(result.terminated)
         if self.history_storage == "full":
             self.histories[:, slot].copy_(history)
@@ -106,37 +114,55 @@ class Replay:
             self.history_depth[:, slot].copy_(self.next_history_depth)
             # 结束标志属于本次动作，只限制下一决策态的历史回退深度。
             self.next_history_depth.copy_(torch.where(
-                self.done[:, slot], 1, (self.next_history_depth + 1).clamp_max(self.spec.history_length)))
+                done, 1, (self.next_history_depth + 1).clamp_max(self.spec.history_length)))
         self.clock += 1
         self.size = min(self.size + 1, self.capacity)
         if self.device_sampling:
             self.clock_device.add_(1)
             self.size_device.add_(1).clamp_max_(self.capacity)
 
+    def _store_terminal_states(self, slot, rows, final):
+        """连续步共用下一决策态，仅对重置分岔的行分配独立的全精度目标。"""
+        first = self.terminal_ends[slot]
+        end = self.terminal_clock + rows.numel()
+        old_capacity = len(self.terminal_states)
+        if end - first > old_capacity:
+            capacity = 1 << (end - first - 1).bit_length()
+            storage = self.terminal_states.new_empty(capacity, self.terminal_states.shape[-1])
+            live = torch.arange(first, self.terminal_clock, device=self.device)
+            storage[live % capacity] = self.terminal_states[live % old_capacity]
+            self.terminal_states = storage
+        ids = torch.arange(self.terminal_clock, end, device=self.device)
+        self.terminal_indices[:, slot].fill_(-1)
+        self.terminal_indices[rows, slot] = ids
+        self.terminal_states[ids % len(self.terminal_states)] = final.data[rows]
+        self.terminal_ends[slot] = end
+        self.terminal_clock = end
+
     def ready(self, horizon: int) -> bool:
-        return self.size > horizon + 1
+        return self.size >= horizon
 
     def _sample_positions(self, batch, horizon, device_indices):
         rows = torch.randint(self.num_envs, (batch,), device=self.device)
         if device_indices:
             # 上界随每次重放变化；FP64量化保持近似均匀分布，随机流不同于randint。
-            bound = self.size_device - horizon
+            bound = self.size_device - max(horizon - 1, 0)
             logical = (torch.rand(batch, dtype=torch.float64, device=self.device) * bound).long()
             logical = logical.clamp_max(bound - 1)
             absolute = self.clock_device - self.size_device + logical
         else:
-            logical = (torch.randint(0, self.size - horizon, (batch,), device=self.device) if horizon
+            logical = (torch.randint(0, self.size - horizon + 1, (batch,), device=self.device) if horizon
                        else torch.randint(self.size, (batch,), device=self.device))
             absolute = self.clock - self.size + logical
         return rows, absolute
 
     def _sample_indices(self, batch: int, horizon: int, *, device_indices=False):
         rows, absolute = self._sample_positions(batch, horizon, device_indices)
-        return rows, absolute % self.capacity
+        return rows, absolute % self.slot_count
 
     def sample_seeds(self, batch: int, *, device_indices=False) -> Seed:
         rows, absolute = self._sample_positions(batch, 0, device_indices)
-        slots = absolute % self.capacity
+        slots = absolute % self.slot_count
         if self.history_storage == "full":
             history = self.histories[rows, slots].float()
         else:
@@ -156,11 +182,14 @@ class Replay:
 
     def gather_windows(self, rows: Tensor, starts: Tensor, horizon: int) -> Window:
         """按既定环境与时间索引读取窗口，不再消费随机数。"""
-        slots = (starts[:, None] + torch.arange(horizon, device=self.device)) % self.capacity
-        done = self.done[rows[:, None], slots]
-        valid = (~done).cumprod(dim=1).bool()
-        return Window(self.states.index((rows, starts)), self.actions[rows[:, None], slots],
-                      self.states.index((rows[:, None], (slots + 1) % self.capacity)), valid,
+        slots = (starts[:, None] + torch.arange(horizon, device=self.device)) % self.slot_count
+        terminal = self.terminal_indices[rows[:, None], slots]
+        done = terminal >= 0
+        valid = torch.cat((torch.ones_like(done[:, :1]), ~done[:, :-1]), dim=1).cumprod(dim=1).bool()
+        following = self.states.data[rows[:, None], (slots + 1) % self.slot_count]
+        finals = self.terminal_states[terminal % len(self.terminal_states)]
+        targets = TaskState.from_flat(torch.where(done[:, :, None], finals, following), self.states.widths)
+        return Window(self.states.index((rows, starts)), self.actions[rows[:, None], slots], targets, valid,
                       self.terminated[rows[:, None], slots])
 
 

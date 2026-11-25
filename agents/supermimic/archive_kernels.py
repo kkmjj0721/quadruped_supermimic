@@ -49,10 +49,10 @@ def write_windows(destination, source, accepted, indices):
 @triton.jit
 def _sample_archive_or_replay(initial, actions, targets, valid, terminated,
                              archive_initial, archive_actions, archive_targets, archive_valid, archive_terminated,
-                             replay_initial, replay_actions, replay_targets, replay_done, replay_terminated,
+                             replay_states, replay_actions, terminal_states, terminal_indices, replay_terminated,
                              rows, starts, indices, populated,
                              STATE: tl.constexpr, ACTION: tl.constexpr, STEPS: tl.constexpr,
-                             CAPACITY: tl.constexpr, BLOCK: tl.constexpr, TIME_BLOCK: tl.constexpr):
+                             SLOTS: tl.constexpr, TERMINALS: tl.constexpr, BLOCK: tl.constexpr, TIME_BLOCK: tl.constexpr):
     row = tl.program_id(0)
     columns = tl.arange(0, BLOCK)
     initial_mask = columns < STATE
@@ -71,21 +71,25 @@ def _sample_archive_or_replay(initial, actions, targets, valid, terminated,
     else:
         environment = tl.load(rows + row)
         start = tl.load(starts + row)
-        initial_values = tl.load(replay_initial + (environment * CAPACITY + start) * STATE + columns,
+        initial_values = tl.load(replay_states + (environment * SLOTS + start) * STATE + columns,
                                  initial_mask, other=0)
-        action_slots = (start + columns // ACTION) % CAPACITY
-        action_values = tl.load(replay_actions + (environment * CAPACITY + action_slots) * ACTION + columns % ACTION,
+        action_slots = (start + columns // ACTION) % SLOTS
+        action_values = tl.load(replay_actions + (environment * SLOTS + action_slots) * ACTION + columns % ACTION,
                                 action_mask, other=0)
-        target_slots = (start + columns // STATE + 1) % CAPACITY
-        target_values = tl.load(replay_targets + (environment * CAPACITY + target_slots) * STATE + columns % STATE,
-                                target_mask, other=0)
+        target_slots = (start + columns // STATE) % SLOTS
+        terminal = tl.load(terminal_indices + environment * SLOTS + target_slots, target_mask, other=-1)
+        ordinary = tl.load(replay_states + (environment * SLOTS + (target_slots + 1) % SLOTS) * STATE + columns % STATE,
+                           target_mask & (terminal < 0), other=0)
+        final = tl.load(terminal_states + (terminal % TERMINALS) * STATE + columns % STATE,
+                        target_mask & (terminal >= 0), other=0)
+        target_values = tl.where(terminal >= 0, final, ordinary)
         steps = tl.arange(0, TIME_BLOCK)
         replay_step_mask = steps < STEPS
-        step_slots = (start + steps) % CAPACITY
-        ended = tl.load(replay_done + environment * CAPACITY + step_slots, replay_step_mask, other=0)
-        replay_termination_values = tl.load(replay_terminated + environment * CAPACITY + step_slots, replay_step_mask, other=0)
-        # 结束当步的下一决策态已重置，不进入有效物理监督。
-        replay_valid_values = tl.cumsum(ended.to(tl.int32)) == 0
+        step_slots = (start + steps) % SLOTS
+        ended = (tl.load(terminal_indices + environment * SLOTS + step_slots, replay_step_mask, other=-1) >= 0).to(tl.int32)
+        replay_termination_values = tl.load(replay_terminated + environment * SLOTS + step_slots, replay_step_mask, other=0)
+        # 只检查此前各步是否已结束，当前步的终点仍可监督。
+        replay_valid_values = tl.cumsum(ended) == ended
         tl.store(valid + row * STEPS + steps, replay_valid_values, replay_step_mask)
         tl.store(terminated + row * STEPS + steps, replay_termination_values, replay_step_mask)
     tl.store(initial + row * STATE + columns, initial_values, initial_mask)
@@ -107,8 +111,8 @@ def sample_archive_or_replay(archive, replay, rows, starts, indices, horizon, po
     _sample_archive_or_replay[(batch,)](
         initial, actions, targets, valid, terminated,
         archive.initial.data, archive.actions, archive.targets.data, archive.valid, archive.terminated,
-        replay.states.data, replay.actions, replay.states.data, replay.done, replay.terminated,
-        rows, starts, indices, populated, state_width, action_width, horizon, replay.capacity,
+        replay.states.data, replay.actions, replay.terminal_states, replay.terminal_indices, replay.terminated,
+        rows, starts, indices, populated, state_width, action_width, horizon, replay.slot_count, len(replay.terminal_states),
         block, triton.next_power_of_2(horizon))
     return Window(TaskState.from_flat(initial, archive.initial.widths), actions,
                   TaskState.from_flat(targets, archive.targets.widths), valid, terminated)

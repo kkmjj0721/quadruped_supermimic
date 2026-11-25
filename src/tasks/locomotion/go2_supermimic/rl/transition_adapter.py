@@ -175,12 +175,7 @@ class Go2TransitionAdapter:
         versions = self.context_version.clone()
         _, _, _, raw_truncated, _ = self.raw_env.step(actions)
         physical = self.task.read_physical(self.raw_env).clone()
-        contact_sensor = self.raw_env.scene["feet_ground_contact"]
-        sensor = contact_sensor.data
-        final = self.task.advance(before, actions, physical,
-                                  contact_times=(sensor.current_air_time.clone(), sensor.current_contact_time.clone(),
-                                                 sensor.last_air_time.clone(), contact_sensor.compute_first_contact(self.step_dt).float(),
-                                                 sensor.last_contact_time.clone())).detached_clone()
+        final = self.task.advance(before, actions, physical).detached_clone()
         if self._play_commands is not None:
             final.command.copy_(self._play_commands)
         terminated = (torch.zeros(self.num_envs, dtype=torch.bool, device=self.device) if self.no_terminations
@@ -222,7 +217,7 @@ class Go2TransitionAdapter:
                                  base_height=self.task.physical_features(final)[:, 0].mean(),
                                  # 参考 train.py:406 的诊断量：机体系偏航角速度超过 3 rad/s 的比例，用于发现打转。
                                  fast_yaw=(final.physical[:, ANGULAR_BODY][:, 2].abs() > 3.0).float().mean())
-        return EnvStep(final, self._state.detached_clone(), reward, terminated, truncated, versions)
+        return EnvStep(final, self._state.detached_clone(), reward, terminated, truncated, versions, done_ids)
 
     # ---------- 课程持久化与资源释放 ----------
 

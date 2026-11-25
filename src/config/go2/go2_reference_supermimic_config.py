@@ -252,7 +252,6 @@ class Go2ReferenceCfg(BaseConfig):
         tracking_angular_variance = 0.25
         pose_tracking_gate = True  # main：移动时按实际速度跟踪门控，站立保留原姿态分。
         fall_angle = 1.5
-        fall_softness_deg = 5.0  # 保留SuperMimic已有的想象倾角软失败。
         base_contact_threshold = 5.0
         command_threshold = 0.1
         stuck_velocity_threshold = 0.1  # PROOF：平移命令高于阈值而body水平速度低于阈值时惩罚。

@@ -125,6 +125,8 @@ class PlaneSurface:
     def height(self, xy):
         return xy.sum(-1) * 0 + self.elevation
 
+    nearest_height = height
+
 
 class TerrainGeometry:
     """按地块选择静态碰撞表面；查询热路径只使用Torch。"""
@@ -339,6 +341,13 @@ class TerrainSurface:
     def contains(self, xy, margin=0.0):
         """来源高度图对所有有限坐标有效，域外取边缘值。"""
         return torch.isfinite(xy).all(-1)
+
+    def nearest_height(self, xy):
+        """读取最近的原始栅格节点，用于保留桩边的支撑阶跃。"""
+        gx = ((xy[..., 0] - self.origin[0]) / self.res).round().long()
+        gy = ((xy[..., 1] - self.origin[1]) / self.res).round().long()
+        height, width = self.h.shape
+        return self.h[gy.clamp(0, height - 1), gx.clamp(0, width - 1)]
 
     def height(self, xy):
         gx = (xy[..., 0] - self.origin[0]) / self.res

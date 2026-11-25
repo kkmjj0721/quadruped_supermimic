@@ -96,15 +96,12 @@ class WorldModel(nn.Module):
         self.input_norm.update(self.task.model_input(state, action), mask)
         self.output_norm.update(self.task.model_target(state, target), mask)
 
-    def forward(self, state: TaskState, action: Tensor, recorded_current: TaskState | None = None) -> TaskState:
-        return self.predict(state, action, recorded_current)[0]
+    def forward(self, state: TaskState, action: Tensor) -> TaskState:
+        return self.predict(state, action)[0]
 
-    def predict(self, state: TaskState, action: Tensor,
-                recorded_current: TaskState | None = None) -> tuple[TaskState, Tensor]:
+    def predict(self, state: TaskState, action: Tensor) -> tuple[TaskState, Tensor]:
         """共享一次网络前向，监督同时取得推进状态与未施加输出链接的原始预测。"""
-        inputs = (self.task.model_input(state, action) if recorded_current is None
-                  else self.task.supervised_model_input(state, action, recorded_current))
-        normalized = self.input_norm(inputs)
+        normalized = self.input_norm(self.task.model_input(state, action))
         if self.use_bf16:
             # 仅网络参与混合精度；反归一化及任务状态推进保持 FP32。
             with torch.autocast("cuda", dtype=torch.bfloat16, cache_enabled=False):
@@ -124,29 +121,27 @@ class WorldModel(nn.Module):
         """默认沿用输出统计；残差模型可独立定义物理状态误差尺度。"""
         return self.output_norm.std
 
-    def supervised_loss(self, current, predicted, target, recorded_current, delta, scale) -> Tensor:
+    def supervised_loss(self, predicted, target, delta, scale) -> Tensor:
         """默认监督标准化物理误差；任务子类可定义其分类输出的损失。"""
         del delta
-        error = self.task.model_error(current, predicted, target, recorded_current) / scale
+        error = self.task.model_error(predicted, target) / scale
         return error.square().mean(-1)
 
-    def _supervised_step(self, current, action, target, recorded_current, scale):
+    def _supervised_step(self, current, action, target, scale):
         """返回完整推进状态和逐样本损失，使区域编译保留advance的随机数消费。"""
-        predicted, delta = self.predict(current, action, recorded_current)
-        loss = self.supervised_loss(current, predicted, target, recorded_current, delta, scale)
+        predicted, delta = self.predict(current, action)
+        loss = self.supervised_loss(predicted, target, delta, scale)
         return predicted, loss
 
     def _loss(self, window) -> Tensor:
         current = window.initial
-        recorded_current = window.initial
         scale = self.loss_scale()
         total = current.physical.new_zeros(())
         for step in range(window.actions.shape[1]):
             target = window.targets.index((slice(None), step))
             action = window.actions[:, step]
-            predicted, loss = self._supervised_step_kernel(current, action, target, recorded_current, scale)
+            predicted, loss = self._supervised_step_kernel(current, action, target, scale)
             total = total + (loss * window.valid[:, step]).sum()
             # 本协议的记忆只含记录动作与外生计时，按日志恢复命令重采样；物理状态始终回喂预测。
             current = TaskState(predicted.physical, target.memory, target.command, target.context)
-            recorded_current = target
         return total / window.valid.sum().clamp_min(1)

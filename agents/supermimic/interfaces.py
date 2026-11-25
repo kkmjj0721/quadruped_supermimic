@@ -91,6 +91,7 @@ class EnvStep:
     terminated: Tensor
     truncated: Tensor
     context_version: Tensor
+    done_ids: Tensor
 
 
 def append_history(history: Tensor, observation: Tensor) -> Tensor:

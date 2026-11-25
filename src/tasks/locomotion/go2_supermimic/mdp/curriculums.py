@@ -1,7 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：保持固定HIM速度范围，按Go2 HIM行走表现升降地形难度。"""
-
-from copy import deepcopy
+"""内容：按地形提供固定指令范围，按Go2 HIM行走表现升降地形难度。"""
 
 import torch
 import numpy as np
@@ -12,8 +10,14 @@ class CommandCurriculum:
     """只提供固定范围与进度计数，不进行速度课程。"""
 
     def __init__(self, cfg, families, device="cpu"):
-        self.cfg = deepcopy(cfg)
         self.device = torch.device(device)
+        ranges = torch.tensor(cfg.initial_ranges, dtype=torch.float32, device=self.device)
+        self.bounds = ranges.repeat(len(families), 1, 1)
+        for index, name in enumerate(families):
+            if name == "stepping_stones":
+                self.bounds[index, 0] = ranges[0].clamp_min(0)
+                self.bounds[index, 1] = 0
+        self.standing_probability = cfg.rel_standing_envs
         self.control_steps = 0
 
     @property
@@ -21,9 +25,8 @@ class CommandCurriculum:
         return self.control_steps
 
     def parameters(self, family_ids):
-        bounds = torch.tensor(self.cfg.initial_ranges, dtype=torch.float32, device=self.device)
-        return (bounds.flatten().expand(family_ids.numel(), -1),
-                torch.full((family_ids.numel(), 1), self.cfg.rel_standing_envs, device=self.device))
+        return (self.bounds[family_ids].flatten(1),
+                torch.full((family_ids.numel(), 1), self.standing_probability, device=self.device))
 
     def state_dict(self):
         return {"control_steps": self.control_steps}
