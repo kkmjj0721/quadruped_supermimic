@@ -3,14 +3,12 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager, nullcontext
-from dataclasses import fields, is_dataclass
+from contextlib import contextmanager
 import gc
 
 import torch
 
-from .buffer import Seed
-from .learner import Learner, clip_gradients, frozen
+from .learner import Learner
 from .optim import MuonAdam
 
 
@@ -28,52 +26,24 @@ def _capture_without_gc():
             gc.enable()
 
 
-def _clone_inputs(value):
-    """为图输入保留独立存储；递归保持 Window、Seed 和 TaskState 的协议。"""
-    if isinstance(value, torch.Tensor):
-        return value.detach().clone()
-    if is_dataclass(value):
-        return type(value)(**{field.name: _clone_inputs(getattr(value, field.name)) for field in fields(value)})
-    if isinstance(value, tuple):
-        return tuple(_clone_inputs(item) for item in value)
-    raise TypeError(f"Unsupported CUDA-graph input type: {type(value).__name__}")
-
-
-@torch.no_grad()
-def _copy_inputs(target, source):
-    """只更新已捕获输入的值，不改变图使用的内存地址。"""
-    if isinstance(target, torch.Tensor):
-        target.copy_(source)
-    elif is_dataclass(target):
-        for field in fields(target):
-            _copy_inputs(getattr(target, field.name), getattr(source, field.name))
-    else:
-        for destination, current in zip(target, source, strict=True):
-            _copy_inputs(destination, current)
-
-
 class CapturedUpdate:
     """前三次真实更新用于侧流预热，第四次捕获并重放；从不额外训练。"""
 
     def __init__(self, function, device: torch.device, *, warmup: int = 3):
         self.function, self.device, self.warmup = function, torch.device(device), warmup
         self.calls = self.replays = 0
-        self.graph = self.inputs = self.outputs = None
+        self.graph = self.outputs = None
         self.stream = torch.cuda.Stream(device=self.device)
 
-    def __call__(self, *inputs):
+    def __call__(self):
         # torch.compile、无显式device的算子和图创建均使用同一目标设备。
         with torch.cuda.device(self.device):
-            if self.inputs is None:
-                self.inputs = _clone_inputs(inputs)
-            else:
-                _copy_inputs(self.inputs, inputs)
             self.calls += 1
             current = torch.cuda.current_stream(self.device)
             if self.calls <= self.warmup:
                 self.stream.wait_stream(current)
                 with torch.cuda.stream(self.stream):
-                    outputs = self.function(*self.inputs)
+                    outputs = self.function()
                 current.wait_stream(self.stream)
                 return outputs
             if self.graph is None:
@@ -81,7 +51,7 @@ class CapturedUpdate:
                 with _capture_without_gc():
                     self.graph = torch.cuda.CUDAGraph()
                     with torch.cuda.graph(self.graph, stream=self.stream):
-                        self.outputs = self.function(*self.inputs)
+                        self.outputs = self.function()
                 # 捕获只记录 CUDA 工作；下面这次 replay 才是本次实际更新。
                 print(f"[INFO] Captured CUDA update graph: {self.function.__name__}", flush=True)
             self.graph.replay()
@@ -92,22 +62,20 @@ class CapturedUpdate:
 # ---------- 可捕获更新 ----------
 
 class CudaGraphLearner(Learner):
-    """图化计算保持基线损失、微批、更新次数、速度监督和护栏接口。"""
+    """复用唯一学习实现，整轮采样与更新由runner捕获。"""
 
     def __init__(self, task, actor, model, critic, config, execution=None):
         self.device = next(model.parameters()).device
-        self._actor_updates = {}
-        self._critic_update = None
+        self.graph_generation = 0
+        self.model_graph_generation = 0
         super().__init__(task, actor, model, critic, config, execution)
         self.model_optimizer = self._make_optimizer("model", capturable=True)
-        self._model_update = CapturedUpdate(self._model_core, self.device)
 
     def reset_policy_optimizers(self):
-        """护栏重建优化器时同步失效旧 actor／critic 图，不动世界模型图。"""
+        """护栏替换优化器后让runner重新捕获策略与价值更新。"""
         self.actor_optimizer = self._make_optimizer("actor", capturable=True)
         self.critic_optimizer = self._make_optimizer("critic", capturable=True)
-        self._actor_updates = {}
-        self._critic_update = None
+        self.graph_generation += 1
 
     def schedule(self, iteration: int):
         rates = [(group, group["lr"]) for optimizer in
@@ -130,125 +98,8 @@ class CudaGraphLearner(Learner):
             for group, reference in zip(optimizer.param_groups, references, strict=True):
                 reference.copy_(torch.as_tensor(group["lr"], device=self.device))
                 group["lr"] = reference
-        # 加载会替换优化器状态存储；重建所有更新图，避免继续引用旧地址。
-        self._model_update = CapturedUpdate(self._model_core, self.device)
-        self._actor_updates = {}
-        self._critic_update = None
-
-    def _model_core(self, window):
-        self.model_optimizer.zero_grad(set_to_none=True)
-        loss = self.model.loss(window)
-        loss.backward()
-        gradient = clip_gradients(self.model.parameters(), self.config.grad_clip)
-        self.model_optimizer.step()
-        return loss.detach(), gradient.detach(), window.valid.sum()
-
-    def fit_model(self, window):
-        loss, gradient, valid = self._model_update(window)
-        self.model_updates.add_(1)
-        return {"wm_loss": loss.clone(), "wm_grad_norm": gradient.clone(),
-                "wm_valid_steps": valid.clone(),
-                "cuda_graph/model_captured": float(self._model_update.graph is not None),
-                "cuda_graph/model_replays": self._model_update.replays}
-
-    def _actor_core(self, seed, *, freeze_actor):
-        cfg, batch = self.config, seed.history.shape[0]
-        self.actor_optimizer.zero_grad(set_to_none=True)
-        feature_batches, target_batches, metrics = [], [], {}
-        velocity_mse_axes = seed.history.new_zeros(3)
-        with frozen(self.model, self.critic):
-            for start in range(0, batch, self.execution.imag_microbatch):
-                end = min(start + self.execution.imag_microbatch, batch)
-                weight = (end - start) / batch
-                part = Seed(seed.state.index(slice(start, end)), seed.history[start:end])
-                data = self.imagination.rollout(part)
-                targets = self.imagination.lambda_returns(data)
-                control_loss = -data.objective.mean()
-                _, velocity = self.actor.encode(part.history)
-                target_velocity = self.task.body_linear_velocity(part.state).detach()
-                velocity_error = (velocity - target_velocity).square()
-                velocity_loss = velocity_error.mean()
-                loss = control_loss + cfg.velocity_loss_coef * velocity_loss
-                (loss * weight).backward()
-                feature_batches.append(data.features[:, :-1].flatten(0, 1).detach())
-                target_batches.append(targets.flatten().detach())
-                velocity_mse_axes += velocity_error.detach().mean(0) * weight
-                values = {"control_loss": control_loss.detach(), "velocity_loss": velocity_loss.detach(),
-                          "actor_loss": loss.detach(), "imagination/survival_h": data.survival.detach().mean(),
-                          "imagination/discounted_reward": data.discounted_reward.detach().mean(),
-                          "imagination/bootstrap": data.bootstrap.detach().mean(),
-                          "imagination/reward": data.rewards.mean()}
-                for name, value in values.items():
-                    metrics[name] = metrics.get(name, 0) + value * weight
-                del data, targets, loss, control_loss, velocity_loss, velocity_error, velocity, target_velocity, values, part
-            metrics["velocity_rmse"] = velocity_mse_axes.mean().sqrt()
-            for axis, value in zip(("x", "y", "z"), velocity_mse_axes.sqrt()):
-                metrics[f"velocity_rmse_{axis}"] = value
-            gradient = clip_gradients(self.actor.policy_parameters(), cfg.grad_clip, cfg.grad_clip_element)
-            if not freeze_actor:
-                self.actor_optimizer.step()
-        metrics["control_grad_norm"] = gradient.detach()
-        return metrics, torch.cat(feature_batches), torch.cat(target_batches)
-
-    def _critic_core(self, features, targets):
-        cfg, optimizer = self.config, self.critic_optimizer
-        # 每次真实critic更新仅累计一次统计，随图重放直接提交。
-        self.critic.normalizer.update(features)
-        minibatch = features.shape[0] // cfg.critic_minibatches
-        losses = []
-        for _ in range(cfg.critic_epochs):
-            indices = torch.randperm(features.shape[0], device=features.device)
-            for index in range(cfg.critic_minibatches):
-                selected = indices[index * minibatch:(index + 1) * minibatch]
-                optimizer.zero_grad(set_to_none=True)
-                value_loss = features.new_zeros(())
-                for part in selected.split(self.execution.critic_microbatch):
-                    partial_loss = self.critic_loss_kernel(features[part], targets[part])
-                    weighted_loss = partial_loss * (part.numel() / selected.numel())
-                    weighted_loss.backward()
-                    value_loss += weighted_loss.detach()
-                    del partial_loss, weighted_loss
-                clip_gradients(self.critic.parameters(), cfg.grad_clip)
-                optimizer.step()
-                losses.append(value_loss)
-        return torch.stack(losses).mean()
-
-    def timing_setup_pending(self, *, control_enabled=False, freeze_actor=False):
-        """按本轮实际使用的图判断是否仍有预热／捕获，查询不创建或重放图。"""
-        if self._model_update.graph is None:
-            return True
-        if not control_enabled:
-            return False
-        actor = self._actor_updates.get(freeze_actor)
-        return (actor is None or actor.graph is None or self._critic_update is None
-                or self._critic_update.graph is None)
-
-    def improve(self, seed, *, freeze_actor=False, timing=None):
-        batch = seed.history.shape[0]
-        if freeze_actor not in self._actor_updates:
-            self._actor_updates[freeze_actor] = CapturedUpdate(
-                lambda value: self._actor_core(value, freeze_actor=freeze_actor), self.device)
-        actor_update = self._actor_updates[freeze_actor]
-        with timing.section("actor_update") if timing is not None else nullcontext():
-            metrics, features, targets = actor_update(seed)
-            if not freeze_actor:
-                self.actor_updates.add_(1)
-        with timing.section("critic_prepare") if timing is not None else nullcontext():
-            # 这里只处理静态形状和图对象；归一化在critic图中先于优化执行。
-            minibatch = features.shape[0] // self.config.critic_minibatches
-            if self._critic_update is None:
-                self._critic_update = CapturedUpdate(self._critic_core, self.device)
-        with timing.section("critic_update") if timing is not None else nullcontext():
-            value_loss = self._critic_update(features, targets)
-        self.critic_updates.add_(self.config.critic_epochs * self.config.critic_minibatches)
-        result = {name: value.clone() for name, value in metrics.items()}
-        result.update({"critic_loss": value_loss.clone(),
-                       "control_learning_rate": self.actor_optimizer.param_groups[0]["lr"].clone(),
-                       "execution/imag_batch": batch,
-                       "execution/imag_microbatch": min(batch, self.execution.imag_microbatch),
-                       "execution/critic_microbatch": min(self.execution.critic_microbatch, minibatch),
-                       "cuda_graph/actor_captured": float(actor_update.graph is not None),
-                       "cuda_graph/actor_replays": actor_update.replays,
-                       "cuda_graph/critic_captured": float(self._critic_update.graph is not None),
-                       "cuda_graph/critic_replays": self._critic_update.replays})
-        return result
+        # 加载替换状态存储，按受影响优化器失效图地址。
+        if name == "model":
+            self.model_graph_generation += 1
+        else:
+            self.graph_generation += 1

@@ -31,9 +31,9 @@ def clip_gradients(parameters, norm: float, element: float | None = None):
     parameters = list(parameters)
     value = nn.utils.clip_grad_norm_(parameters, norm)
     if element is not None:
-        for parameter in parameters:
-            if parameter.grad is not None:
-                parameter.grad.clamp_(-element, element)
+        gradients = [parameter.grad for parameter in parameters]
+        torch._foreach_clamp_min_(gradients, -element)
+        torch._foreach_clamp_max_(gradients, element)
     return value
 
 
@@ -92,7 +92,7 @@ class Learner:
         if kind == "muon_adam":
             return MuonAdam(module, [module] if name == "actor" else [module.net], cfg.learning_rate,
                             betas=betas, fused=fused, capturable=capturable, io=name == "actor",
-                            weight_decay=cfg.muon_weight_decay)
+                            weight_decay=cfg.muon_weight_decay, compile_backend=cfg.compile_backend)
         parameters = list(module.policy_parameters() if name == "actor" else module.parameters())
         rate = torch.tensor(cfg.learning_rate, device=parameters[0].device) if capturable else cfg.learning_rate
         return torch.optim.Adam(parameters, lr=rate, betas=betas, fused=fused, capturable=capturable)
@@ -126,19 +126,19 @@ class Learner:
         return {"wm_loss": loss.detach(), "wm_grad_norm": gradient.detach(),
                 "wm_valid_steps": window.valid.sum()}
 
-    def _critic_loss(self, features, targets):
-        return (self.critic(features) - targets).square().mean()
+    def _critic_loss(self, normalized_features, targets, weights, weight_mean):
+        error = self.critic.net(normalized_features).squeeze(-1) - targets
+        return (error.square() * weights).mean() / weight_mean
 
-    def timing_setup_pending(self, *, control_enabled=False, freeze_actor=False):
-        """普通执行没有独立的Graph预热／捕获阶段。"""
-        return False
-
-    def _fit_critic(self, features, targets, *, timing=None):
-        """以固定想象目标拟合价值网络，保留尾批与分批累积语义。"""
+    def _fit_critic(self, features, targets, weights, *, timing=None):
+        """按累计存活权重拟合固定目标，保留尾批与分批累积语义。"""
         cfg = self.config
         critic, optimizer = self.critic, self.critic_optimizer
         with timing.section("critic_prepare") if timing is not None else nullcontext():
-            critic.normalizer.update(features)
+            critic.normalizer.update(features, mask=weights > 0)
+            normalized_features = critic.normalizer(features)
+            # 每个种子的首步权重为1；全批分母为正，零权重小批无需另设分支。
+            weight_mean = weights.mean()
             losses = []
             minibatch = features.shape[0] // cfg.critic_minibatches
         with timing.section("critic_update") if timing is not None else nullcontext():
@@ -150,7 +150,8 @@ class Learner:
                     optimizer.zero_grad(set_to_none=True)
                     value_loss = features.new_zeros(())
                     for part in selected.split(self.execution.critic_microbatch):
-                        partial_loss = self.critic_loss_kernel(features[part], targets[part])
+                        partial_loss = self.critic_loss_kernel(
+                            normalized_features[part], targets[part], weights[part], weight_mean)
                         weighted_loss = partial_loss * (part.numel() / selected.numel())
                         weighted_loss.backward()
                         value_loss += weighted_loss.detach()
@@ -165,7 +166,7 @@ class Learner:
         batch = seed.history.shape[0]
         with timing.section("actor_update") if timing is not None else nullcontext():
             self.actor_optimizer.zero_grad(set_to_none=True)
-            feature_batches, target_batches = [], []
+            feature_batches, target_batches, weight_batches = [], [], []
             metrics = {}
             velocity_mse_axes = seed.history.new_zeros(3)
             with frozen(self.model, self.critic):
@@ -176,7 +177,7 @@ class Learner:
                     data = self.imagination.rollout(part)
                     targets = self.imagination.lambda_returns(data)
                     control_loss = -data.objective.mean()
-                    _, velocity = self.actor.encode(part.history)
+                    velocity = data.initial_velocity
                     target_velocity = self.task.body_linear_velocity(part.state).detach()
                     velocity_error = (velocity - target_velocity).square()
                     velocity_loss = velocity_error.mean()
@@ -184,6 +185,7 @@ class Learner:
                     (loss * weight).backward()
                     feature_batches.append(data.features[:, :-1].flatten(0, 1).detach())
                     target_batches.append(targets.flatten().detach())
+                    weight_batches.append(data.survivals[:, :-1].flatten().detach())
                     velocity_mse_axes += velocity_error.detach().mean(0) * weight
                     values = {"control_loss": control_loss.detach(), "velocity_loss": velocity_loss.detach(),
                               "actor_loss": loss.detach(),
@@ -204,11 +206,14 @@ class Learner:
                     self.actor_updates.add_(1)
             features = torch.cat(feature_batches)
             targets = torch.cat(target_batches)
-            del feature_batches, target_batches
-        value_loss, updates, minibatch = (self._fit_critic(features, targets) if timing is None else
-                                         self._fit_critic(features, targets, timing=timing))
+            weights = torch.cat(weight_batches)
+            del feature_batches, target_batches, weight_batches
+        value_loss, updates, minibatch = (self._fit_critic(features, targets, weights) if timing is None else
+                                         self._fit_critic(features, targets, weights, timing=timing))
         self.critic_updates.add_(updates)
         metrics.update({"control_grad_norm": gradient.detach(), "critic_loss": value_loss,
+                        "critic/survival_weight_mean": weights.mean(),
+                        "critic/zero_survival_fraction": (weights == 0).float().mean(),
                         "control_learning_rate": self.actor_optimizer.param_groups[0]["lr"],
                         "execution/imag_batch": batch,
                         "execution/imag_microbatch": min(batch, self.execution.imag_microbatch),

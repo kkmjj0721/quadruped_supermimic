@@ -18,7 +18,7 @@ from .reference_kinematics import Go2Kinematics
 from .reference_rotations import mat_to_quat, mv3, quat_to_mat
 from .structured_dynamics import ResidualDynamics
 from .reference_state import (
-    ANGULAR_BODY, AUXILIARY, BASE_CONTACT_FORCE, CONTACT_FOUND, CONTEXT_COM, FEET,
+    ANGULAR_BODY, AUXILIARY, BASE_CONTACT_EVENT, BASE_CONTACT_FORCE, CONTACT_FOUND, CONTEXT_COM, FEET,
     FOOT_CONTACT_FORCE, GENERALIZED_DELTA_DIM, GRAVITY, HEIGHT, JOINT_ACCELERATION, JOINT_OFFSET,
     JOINT_TORQUE, JOINT_VELOCITY, MODEL_CONTACT, MODEL_EVENTS, MODEL_HISTORY_CONTACT, PHYSICAL_DIM, POSE,
     ROBOT_STATE, VELOCITY_HEADING, body_planar_velocity, body_vertical_velocity, yaw_rotate_inverse,
@@ -62,7 +62,7 @@ class Go2ReferenceTaskModel:
         foot_axis = torch.tensor((-.015, .015), device=self.device)
         self.foot_scan_points = torch.stack(torch.meshgrid(foot_axis, foot_axis, indexing="ij"), -1).reshape(-1, 2)
         self.heightmap_dim = self.scan_points.shape[0]
-        self.model_input_dim = PHYSICAL_DIM - 3 + 12 + 12 + 16 + self.heightmap_dim
+        self.model_input_dim = BASE_CONTACT_EVENT.start - 3 + 12 + 12 + 16 + self.heightmap_dim
         noise = cfg.noise.noise_scales
         self.noise_amplitude = self.default_joint_pos.new_tensor(
             (noise.base_ang_vel,) * 3 + (noise.projected_gravity,) * 3 + (0.,) * 3
@@ -70,7 +70,7 @@ class Go2ReferenceTaskModel:
         payload = {"task": self._semantic_config(), "geometry": surface.geometry_hash,
                    "default_joint_pos": self.default_joint_pos.cpu().tolist(),
                    "joint_limits": self.joint_limits.cpu().tolist(),
-                   "layout": "proof_teacher_physical147_quat4_memory54_context27_critic285_contact_events_v3",
+                   "layout": "proof_teacher_physical148_quat4_memory54_context27_critic285_base_contact_event_v4",
                    "contact_force_frame": "world_force_on_robot",
                    "dynamics": "blinkmimic_residual_fk_quaternion_v1"}
         self.semantic_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -79,8 +79,8 @@ class Go2ReferenceTaskModel:
             observation_dim=45, privileged_dim=cfg.env.num_critic_obs, context_dim=CONTEXT_DIM,
             memory_dim=MEMORY_DIM, command_dim=3, heightmap_dim=self.heightmap_dim,
             history_length=cfg.env.num_obs_history,
-            semantic_id="go2_proof_teacher_ae910b8_contact_events_residual_fk_v3:" + self.semantic_hash,
-            model_id="supermimic_proof_teacher_v2")
+            semantic_id="go2_proof_teacher_ae910b8_contact_events_residual_fk_v4:" + self.semantic_hash,
+            model_id="supermimic_proof_teacher_v3")
 
     def _semantic_config(self) -> dict:
         """运行预算不改变任务语义；模型与观测结构由快照完整描述。"""
@@ -137,12 +137,13 @@ class Go2ReferenceTaskModel:
         stumble = (foot_force[..., :2].norm(dim=-1)
                    > self.cfg.reward.stumble_ratio * foot_force[..., 2].abs()).any(-1, keepdim=True).float()
         calf_contact = (calf_force > self.cfg.reward.contact_force_threshold).float()
+        base_contact = (base_force > self.cfg.reward.base_contact_threshold).float()
         return torch.cat((height, data.projected_gravity_b, yaw_rotate_inverse(data.root_link_lin_vel_w, yaw),
                           data.root_link_ang_vel_b, data.joint_pos - data.default_joint_pos, data.joint_vel, *relative,
                           position[:, :2], yaw[:, None], data.joint_acc,
                           data.site_lin_vel_w[:, self.foot_ids, :2].flatten(1), (sensor.found > 0).float(),
                           foot_force.flatten(1), data.actuator_force, calf_force, base_force, computed_torque,
-                          history_contact, stumble, calf_contact, data.root_link_quat_w), -1)
+                          history_contact, stumble, calf_contact, base_contact, data.root_link_quat_w), -1)
 
     def world_position(self, state: TaskState) -> Tensor:
         xy = state.physical[:, POSE][:, :2]
@@ -175,7 +176,9 @@ class Go2ReferenceTaskModel:
         return state.context[:, CONTEXT_EXTEROCEPTIVE_MASK:CONTEXT_EXTEROCEPTIVE_MASK + 1]
 
     def physical_features(self, state: TaskState) -> Tensor:
-        return torch.cat((state.physical[:, ROBOT_STATE], state.physical[:, self.auxiliary]), -1)
+        """机身碰撞事件只作转移标签，不作为下一步动力学的输入条件。"""
+        return torch.cat((state.physical[:, ROBOT_STATE],
+                          state.physical[:, self.auxiliary.start:BASE_CONTACT_EVENT.start]), -1)
 
     @staticmethod
     def simulation_context(state: TaskState) -> Tensor:
@@ -348,11 +351,11 @@ class Go2ReferenceTaskModel:
                 | (state.physical[:, BASE_CONTACT_FORCE].squeeze(-1) > self.cfg.reward.base_contact_threshold))
 
     def soft_termination(self, state: TaskState) -> Tensor:
-        # 倾角平滑沿用现有SuperMimic；新增base接触保持来源硬阈值，不私自另设软化尺度。
+        # 倾角与机身碰撞概率使用可微软并集，真实力阈值只用于传感器标签和真实终止。
         tilt = torch.acos((-state.physical[:, 3]).clamp(-1 + 1e-4, 1 - 1e-4))
         orientation = torch.sigmoid((tilt - self.cfg.reward.fall_angle) / math.radians(self.cfg.reward.fall_softness_deg))
-        base_contact = state.physical[:, BASE_CONTACT_FORCE].squeeze(-1) > self.cfg.reward.base_contact_threshold
-        return torch.where(base_contact, torch.ones_like(orientation), orientation)
+        base_contact = state.physical[:, BASE_CONTACT_EVENT].squeeze(-1)
+        return orientation + (1 - orientation) * base_contact
 
     def replay_selection(self, window) -> tuple[Tensor, Tensor]:
         """按state基准高度一次计算优先分数及归档资格，保留来源事件定义。"""

@@ -65,7 +65,7 @@ class Go2ReferenceCfg(BaseConfig):
         collect_det_frac: float = 0.25  # 各地形按比例分配无额外动作探索噪声的环境。
 
         # ---------- 编译与回滚 ----------
-        compile_imagination: bool = True  # 编译想象单步、完整lambda-return与critic损失。
+        compile_imagination: bool = True  # 编译四步想象、采集张量、完整lambda-return与critic损失。
         compile_backend: str = "inductor"
         collapse_falls: float = 3.0
         collapse_interval: int = 50

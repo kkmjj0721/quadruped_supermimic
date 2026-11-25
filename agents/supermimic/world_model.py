@@ -13,11 +13,31 @@ from .interfaces import TaskState
 class RunningNorm(nn.Module):
     """按参考实现合并总体方差；前向固定统计，不隐式更新。"""
 
-    def __init__(self, width: int):
+    def __init__(self, width: int, epsilon: float = 1e-6):
         super().__init__()
+        self.epsilon = epsilon
         self.register_buffer("mean", torch.zeros(width))
         self.register_buffer("var", torch.ones(width))
         self.register_buffer("count", torch.tensor(1e-4))
+        self.register_buffer("std", torch.full((width,), 1 + epsilon), persistent=False)
+        self.register_buffer("inv_std", self.std.reciprocal(), persistent=False)
+
+    @torch.no_grad()
+    def refresh_scale(self):
+        """统计更新或恢复后刷新派生尺度，不增加检查点的必需字段。"""
+        self.std.copy_(self.var.sqrt() + self.epsilon)
+        self.inv_std.copy_(self.std.reciprocal())
+
+    def _apply(self, function, recurse=True):
+        super()._apply(function, recurse=recurse)
+        self.refresh_scale()
+        return self
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                      missing_keys, unexpected_keys, error_msgs)
+        self.refresh_scale()
 
     @torch.no_grad()
     def update(self, values: Tensor, mask: Tensor | None = None):
@@ -40,16 +60,17 @@ class RunningNorm(nn.Module):
         self.var.copy_(torch.where(active, updated_var, self.var))
         self.mean.copy_(torch.where(active, updated_mean, self.mean))
         self.count.copy_(torch.where(active, total, self.count))
+        self.refresh_scale()
 
     def forward(self, values: Tensor) -> Tensor:
-        return ((values - self.mean) / (self.var.sqrt() + 1e-6)).clamp(-10.0, 10.0)
+        return ((values - self.mean) * self.inv_std).clamp(-10.0, 10.0)
 
     def unnormalize(self, values: Tensor) -> Tensor:
-        return values * (self.var.sqrt() + 1e-6) + self.mean
+        return values * self.std + self.mean
 
 
 class WorldModel(nn.Module):
-    """任务决定残差坐标；网络只学习记录物理转移，不学习奖励或失败头。"""
+    """任务决定物理残差及事件输出，奖励与失败评分由任务计算。"""
 
     def __init__(self, task, hidden):
         super().__init__()
@@ -101,7 +122,7 @@ class WorldModel(nn.Module):
 
     def loss_scale(self) -> Tensor:
         """默认沿用输出统计；残差模型可独立定义物理状态误差尺度。"""
-        return self.output_norm.var.sqrt() + 1e-6
+        return self.output_norm.std
 
     def supervised_loss(self, current, predicted, target, recorded_current, delta, scale) -> Tensor:
         """默认监督标准化物理误差；任务子类可定义其分类输出的损失。"""

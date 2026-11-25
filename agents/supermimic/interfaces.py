@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass
 
 import torch
 from torch import Tensor
@@ -29,24 +29,50 @@ class AlgorithmSpec:
     semantic_id: str
     heightmap_dim: int
     history_length: int = 10
-    model_id: str = "supermimic_proof_teacher_v2"
+    model_id: str = "supermimic_proof_teacher_v3"
 
     @property
     def hash(self) -> str:
         return hashlib.sha256(json.dumps(asdict(self), sort_keys=True).encode()).hexdigest()
 
 
-@dataclass
+@dataclass(init=False)
 class TaskState:
-    """末轴为特征；通常为[B,D]，窗口目标为[B,T,D]。"""
+    """整块连续状态保存四类特征，字段视图共享末轴存储。"""
 
-    physical: Tensor
-    memory: Tensor
-    command: Tensor
-    context: Tensor
+    data: Tensor
+    widths: tuple[int, int, int, int]
+
+    def __init__(self, physical: Tensor, memory: Tensor, command: Tensor, context: Tensor):
+        self.widths = (physical.shape[-1], memory.shape[-1], command.shape[-1], context.shape[-1])
+        self.data = torch.cat((physical, memory, command, context), dim=-1)
+
+    @classmethod
+    def from_flat(cls, data: Tensor, widths: tuple[int, int, int, int]) -> TaskState:
+        """复用已打包存储；调用方沿用已约定的四段宽度。"""
+        state = cls.__new__(cls)
+        state.data, state.widths = data, widths
+        return state
+
+    @property
+    def physical(self) -> Tensor:
+        return self.data[..., :self.widths[0]]
+
+    @property
+    def memory(self) -> Tensor:
+        return self.data[..., self.widths[0]:self.widths[0] + self.widths[1]]
+
+    @property
+    def command(self) -> Tensor:
+        start = self.widths[0] + self.widths[1]
+        return self.data[..., start:start + self.widths[2]]
+
+    @property
+    def context(self) -> Tensor:
+        return self.data[..., self.widths[0] + self.widths[1] + self.widths[2]:]
 
     def map(self, function) -> TaskState:
-        return TaskState(**{field.name: function(getattr(self, field.name)) for field in fields(self)})
+        return TaskState.from_flat(function(self.data), self.widths)
 
     def index(self, index) -> TaskState:
         return self.map(lambda tensor: tensor[index])

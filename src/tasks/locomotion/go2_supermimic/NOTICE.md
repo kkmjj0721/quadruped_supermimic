@@ -13,11 +13,11 @@
 | `foot_slip`、`stand_still_joint_vel_l2` | 本项目`main@9c3a8ad5658dbef1acf4ff98997b64d01e45f90d`的`mdp/reference_rewards.py`及集中reward配置 | 按用户要求追加两项，权重均为−0.1；沿用平移命令模长加偏航绝对值的0.1阈值，滑移使用瞬时found与世界水平足速平方，站立使用关节速度平方和。保留PROOF原有feet_slide及其接触历史定义；复用现有状态与想象接触概率，不增加模型维度 |
 | `pose` | 本项目`main@9c3a8ad`的`mdp/gait_rewards.py::posture_reward`与`mdp/reference_rewards.py`跟踪门控 | 按用户要求恢复完整分段姿态分与速度跟踪门控，权重调整为0.3；与stuck合计24项奖励。容差与阈值直接采用main；门控保留body平移与world偏航坐标，PROOF其余速度奖励仍使用body偏航。仅迁入pose，不恢复main步态奖励 |
 | 接触与力矩辅助量 | 作者LocoLab [37e567d](https://github.com/syw-robotics/LocoLab/tree/37e567d81ec0198a8984b5c5650cd4489d3a56d3)，`velocity/mdp/{rewards,observations}.py` | 当前足净力先从MuJoCo对地反作用力转换为作用于机器人的世界力，再按正分量>1N后减0.5；滑移使用3物理步历史；非期望接触只计calf。当前资产足端属于calf，按每腿calf几何体净和并排除足几何。限幅前PD力矩从native仿射力模型与实际延迟ctrl恢复，施加力矩另外记录 |
-| 事件概率监督 | 本项目SuperMimic适配，官方PPO没有对应预测头 | 物理视图147维＋四元数4维，模型输入346／输出102；新增任意足绊脚及四腿calf接触logit，以真实标签的未加权BCE均值监督，原97维物理回归MSE保留。真实与想象奖励统一读取事件字段；不把概率校准或能力改善视为已验证 |
+| 事件概率监督 | 本项目SuperMimic适配，官方PPO没有对应预测头 | 物理视图148维＋四元数4维，模型输入346／输出103；任意足绊脚、四腿calf接触及机身碰撞六项logit，以真实标签的未加权BCE均值监督，原97维物理回归MSE保留。机身事件不回喂动力学输入；不把概率校准或能力改善视为已验证 |
 | 默认站姿 | 本项目`main@9c3a8ad`的集中`init_state`配置 | 按用户要求恢复base z=.29、四条thigh=.9、calf=-1.8、hip左右±.1；当前MuJoCo资产前向计算四足球底净空均约.01249m。PD及动作尺度不变 |
 | `mdp/reference_kinematics.py` | 当前Go2 MJCF及原有BlinkMimic FK | 足高按各足yaw方向的四个±0.015m点平均地面；射线起点的+20m不进入高度。想象的last时长／首次落地是接触概率连续代理，真实端读取原生传感器 |
 | `mdp/terrains.py` | 原Ri-5036 HIM地形、PROOF `utils/terrains/terrains_cfg.py`及MjLab 1.6.0 `BoxSteppingStonesTerrainCfg` | 保留原十类及正反光滑金字塔坡，末尾追加方形梅花桩：8×8m地块包含7.5×7.5m桩区和四边各0.25m平地，六档桩面边长30→15cm、环境占比10%；直接复用原生网格及平台对齐，节距约0.416667m、实际桩间净间隙约11.67→26.67cm；平台最小边长2.5m、六档实际边长2.80/2.77/2.74/2.71/2.68/2.65m，四边出口缝与本档桩间缝一致；关闭尺寸与位置扰动，保留难度递增的±2cm高差。课程保持原六级；相对仅含两坡版本，整图居中使原块y平移-4m，局部几何不变 |
-| 终止 | PROOF `mdp_cfg/terminations_cfg.py` | 倾角>1.5rad、base历史净力>5N为失败；20s超时与核心边界外4m为truncation。想象倾角软失败保留现有SuperMimic，base接触使用来源硬阈值 |
+| 终止 | PROOF `mdp_cfg/terminations_cfg.py`；SuperMimic公式(1)–(3)的概率失败接口 | 真实倾角>1.5rad、base历史净力>5N为失败；20s超时与核心边界外4m为truncation。想象保留原倾角sigmoid，与监督机身碰撞概率取可微软并集，不再阈值判定回归base力 |
 
 Go2资产、执行器PD、动作尺度、物理随机化、命令采样、行走表现课程及SuperMimic训练预算沿用本项目。参考实现为IsaacLab3／PhysX，本项目为MjLab1.6／MuJoCo；不将代码对拍或短时训练当作作者性能复现或真机验证。原资产与FK来源说明、`LICENSE_blinkmimic`保持原归属。
 

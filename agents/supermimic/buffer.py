@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 
 import torch
 from torch import Tensor
@@ -37,15 +37,14 @@ class Window:
 
     @staticmethod
     def concatenate(windows):
-        def states(name):
-            return TaskState(**{field.name: torch.cat([getattr(getattr(window, name), field.name) for window in windows])
-                                for field in fields(TaskState)})
-        return Window(states("initial"), torch.cat([window.actions for window in windows]), states("targets"),
+        initial = TaskState.from_flat(torch.cat([window.initial.data for window in windows]), windows[0].initial.widths)
+        targets = TaskState.from_flat(torch.cat([window.targets.data for window in windows]), windows[0].targets.widths)
+        return Window(initial, torch.cat([window.actions for window in windows]), targets,
                       torch.cat([window.valid for window in windows]), torch.cat([window.terminated for window in windows]))
 
 
 class Replay:
-    """以半精度保存历史，所有已采集时刻均可独立作为想象起点。
+    """按环境、时间顺序保存连续状态和半精度历史，可独立采样所有已采集时刻。
 
     frames模式要求逐控制步连续插入：新历史移动一帧，结束后重复新回合首帧。
     首次插入和clear后的首次插入均保留调用方传入的完整历史前缀。
@@ -62,25 +61,25 @@ class Replay:
             # 图重放读取稳定地址的当前边界；主机计数仍供写入和就绪检查使用。
             self.size_device = torch.zeros((), dtype=torch.long, device=device)
             self.clock_device = torch.zeros_like(self.size_device)
-        self.states = self._state_storage((capacity, num_envs))
-        self.final_states = self._state_storage((capacity, num_envs))
-        self.actions = torch.zeros(capacity, num_envs, spec.action_dim, device=device)
+        self.states = self._state_storage((num_envs, capacity))
+        self.final_states = self._state_storage((num_envs, capacity))
+        self.actions = torch.zeros(num_envs, capacity, spec.action_dim, device=device)
         if history_storage == "full":
-            self.histories = torch.zeros(capacity, num_envs, spec.history_length, spec.observation_dim,
+            self.histories = torch.zeros(num_envs, capacity, spec.history_length, spec.observation_dim,
                                          device=device, dtype=torch.float16)
         else:
             self.frame_capacity = capacity + spec.history_length - 1
-            self.observation_frames = torch.zeros(self.frame_capacity, num_envs, spec.observation_dim,
+            self.observation_frames = torch.zeros(num_envs, self.frame_capacity, spec.observation_dim,
                                                   device=device, dtype=torch.float16)
-            self.history_depth = torch.zeros(capacity, num_envs, device=device, dtype=torch.int32)
+            self.history_depth = torch.zeros(num_envs, capacity, device=device, dtype=torch.int32)
             self.next_history_depth = torch.full((num_envs,), spec.history_length, device=device, dtype=torch.int32)
             self.history_offsets = torch.arange(spec.history_length - 1, -1, -1, device=device)
-        self.done = torch.zeros(capacity, num_envs, device=device, dtype=torch.bool)
+        self.done = torch.zeros(num_envs, capacity, device=device, dtype=torch.bool)
         self.terminated = torch.zeros_like(self.done)
 
     def _state_storage(self, shape):
         widths = (self.spec.state_dim, self.spec.memory_dim, self.spec.command_dim, self.spec.context_dim)
-        return TaskState(*(torch.zeros(*shape, width, device=self.device) for width in widths))
+        return TaskState.from_flat(torch.zeros(*shape, sum(widths), device=self.device), widths)
 
     def clear(self):
         self.size = self.clock = 0
@@ -94,23 +93,22 @@ class Replay:
     @torch.no_grad()
     def add(self, state: TaskState, history: Tensor, action: Tensor, result):
         slot = self.clock % self.capacity
-        for field in fields(TaskState):
-            getattr(self.states, field.name)[slot].copy_(getattr(state, field.name))
-            getattr(self.final_states, field.name)[slot].copy_(getattr(result.final_state, field.name))
-        self.actions[slot].copy_(action)
-        self.done[slot].copy_(result.terminated | result.truncated)
-        self.terminated[slot].copy_(result.terminated)
+        self.states.data[:, slot].copy_(state.data)
+        self.final_states.data[:, slot].copy_(result.final_state.data)
+        self.actions[:, slot].copy_(action)
+        self.done[:, slot].copy_(result.terminated | result.truncated)
+        self.terminated[:, slot].copy_(result.terminated)
         if self.history_storage == "full":
-            self.histories[slot].copy_(history)
+            self.histories[:, slot].copy_(history)
         else:
             if self.clock == 0:
                 # 虚拟时刻-(H-1)..-1恰好对应观测环末尾的H-1个槽。
-                self.observation_frames[self.capacity:].copy_(history[:, :-1].transpose(0, 1))
-            self.observation_frames[self.clock % self.frame_capacity].copy_(history[:, -1])
-            self.history_depth[slot].copy_(self.next_history_depth)
+                self.observation_frames[:, self.capacity:].copy_(history[:, :-1])
+            self.observation_frames[:, self.clock % self.frame_capacity].copy_(history[:, -1])
+            self.history_depth[:, slot].copy_(self.next_history_depth)
             # 结束标志属于本次动作，只限制下一决策态的历史回退深度。
             self.next_history_depth.copy_(torch.where(
-                self.done[slot], 1, (self.next_history_depth + 1).clamp_max(self.spec.history_length)))
+                self.done[:, slot], 1, (self.next_history_depth + 1).clamp_max(self.spec.history_length)))
         self.clock += 1
         self.size = min(self.size + 1, self.capacity)
         if self.device_sampling:
@@ -142,27 +140,35 @@ class Replay:
         rows, absolute = self._sample_positions(batch, 0, device_indices)
         slots = absolute % self.capacity
         if self.history_storage == "full":
-            history = self.histories[slots, rows].float()
+            history = self.histories[rows, slots].float()
         else:
-            depth = self.history_depth[slots, rows]
+            depth = self.history_depth[rows, slots]
             back = torch.minimum(self.history_offsets[None, :], depth[:, None] - 1)
             frame_slots = (absolute[:, None] - back) % self.frame_capacity
-            history = self.observation_frames[frame_slots, rows[:, None]].float()
-        return Seed(self.states.index((slots, rows)), history)
+            history = self.observation_frames[rows[:, None], frame_slots].float()
+        return Seed(self.states.index((rows, slots)), history)
 
     def sample_windows(self, batch: int, horizon: int, *, device_indices=False) -> Window:
-        rows, starts = self._sample_indices(batch, horizon - 1, device_indices=device_indices)
+        rows, starts = self.sample_window_indices(batch, horizon, device_indices=device_indices)
+        return self.gather_windows(rows, starts, horizon)
+
+    def sample_window_indices(self, batch: int, horizon: int, *, device_indices=False):
+        """仅消费窗口采样随机数，延后决定是否读取回放数据。"""
+        return self._sample_indices(batch, horizon - 1, device_indices=device_indices)
+
+    def gather_windows(self, rows: Tensor, starts: Tensor, horizon: int) -> Window:
+        """按既定环境与时间索引读取窗口，不再消费随机数。"""
         slots = (starts[:, None] + torch.arange(horizon, device=self.device)) % self.capacity
-        done = self.done[slots, rows[:, None]]
+        done = self.done[rows[:, None], slots]
         # 结束动作仍有真实物理终态，只屏蔽其后的新回合转移。
         valid = torch.cat((torch.ones_like(done[:, :1]), ~done[:, :-1]), dim=1).cumprod(dim=1).bool()
-        return Window(self.states.index((starts, rows)), self.actions[slots, rows[:, None]],
-                      self.final_states.index((slots, rows[:, None])), valid,
-                      self.terminated[slots, rows[:, None]])
+        return Window(self.states.index((rows, starts)), self.actions[rows[:, None], slots],
+                      self.final_states.index((rows[:, None], slots)), valid,
+                      self.terminated[rows[:, None], slots])
 
 
 class WindowArchive:
-    """固定形状候选按掩码写入；环形计数留在设备，无效候选独占暂存槽。"""
+    """固定形状候选按掩码精确写入；无效候选不读取或写入窗口数据。"""
 
     def __init__(self, capacity: int, device="cpu"):
         self.capacity = capacity
@@ -183,7 +189,7 @@ class WindowArchive:
         if self.storage is None:
             # 首批候选即分配，不读取有效数量；候选批次大小由调用方固定。
             def allocate(value):
-                return torch.zeros((self.capacity + candidates, *value.shape[1:]), dtype=value.dtype, device=device)
+                return torch.zeros((self.capacity, *value.shape[1:]), dtype=value.dtype, device=device)
 
             self.storage = Window(windows.initial.map(allocate), allocate(windows.actions), windows.targets.map(allocate),
                                   allocate(windows.valid), allocate(windows.terminated))
@@ -191,38 +197,41 @@ class WindowArchive:
         keep = torch.ones(candidates, dtype=torch.bool, device=device) if keep is None else keep
         rank = keep.long().cumsum(0) - 1
         accepted = keep & (rank < self.capacity)
-        # 有效行在真实容量内地址唯一；无效行分别落入容量之外，绝不覆盖有效数据。
-        indices = torch.where(accepted, (self.clock + rank) % self.capacity,
-                              self.capacity + torch.arange(candidates, device=device))
-        for name in ("initial", "targets"):
-            for field in fields(TaskState):
-                getattr(getattr(self.storage, name), field.name)[indices] = getattr(getattr(windows, name), field.name)
-        for name in ("actions", "valid", "terminated"):
-            getattr(self.storage, name)[indices] = getattr(windows, name)
+        indices = (self.clock + rank) % self.capacity
+        if device.type == "cuda":
+            from .archive_kernels import write_windows
+
+            write_windows(self.storage, windows, accepted, indices)
+        else:
+            selected = indices[accepted]
+            self.storage.initial.data[selected] = windows.initial.data[accepted]
+            self.storage.targets.data[selected] = windows.targets.data[accepted]
+            self.storage.actions[selected] = windows.actions[accepted]
+            self.storage.valid[selected] = windows.valid[accepted]
+            self.storage.terminated[selected] = windows.terminated[accepted]
         count = accepted.sum()
         self.clock.add_(count)
         self.size.add_(count).clamp_max_(self.capacity)
 
-    def _sample(self, batch):
+    def _sample_indices(self, batch):
         # 设备上界避免提取size；FP64随机数量化误差远小于FP32，随机流不同于randint。
         bound = self.size.clamp_min(1)
         indices = (torch.rand(batch, dtype=torch.float64, device=self.size.device) * bound).long()
-        return self.storage.index(indices.clamp_max(bound - 1))
+        return indices.clamp_max(bound - 1)
+
+    def _sample(self, batch):
+        return self.storage.index(self._sample_indices(batch))
 
     def sample(self, batch: int) -> Window:
         return self._sample(batch)
 
-    def sample_or(self, fallback: Window, populated: Tensor) -> Window:
-        """按写入前的占用快照选择归档或均匀窗口，首次入库不提前增加归档份额。"""
+    def sample_or_replay(self, replay: Replay, rows: Tensor, starts: Tensor, horizon: int, populated: Tensor) -> Window:
+        """沿用写入前占用与随机数，仅执行实际选中的归档或回放读取。"""
         if self.storage is None:
-            return fallback
-        sampled = self._sample(fallback.actions.shape[0])
+            return replay.gather_windows(rows, starts, horizon)
+        indices = self._sample_indices(rows.shape[0])
+        if self.size.device.type == "cuda":
+            from .archive_kernels import sample_archive_or_replay
 
-        def state(name):
-            return TaskState(**{field.name: torch.where(populated, getattr(getattr(sampled, name), field.name),
-                                                       getattr(getattr(fallback, name), field.name))
-                                for field in fields(TaskState)})
-
-        return Window(state("initial"), torch.where(populated, sampled.actions, fallback.actions), state("targets"),
-                      torch.where(populated, sampled.valid, fallback.valid),
-                      torch.where(populated, sampled.terminated, fallback.terminated))
+            return sample_archive_or_replay(self.storage, replay, rows, starts, indices, horizon, populated)
+        return self.storage.index(indices) if bool(populated) else replay.gather_windows(rows, starts, horizon)

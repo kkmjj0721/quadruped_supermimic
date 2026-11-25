@@ -12,6 +12,7 @@ import time
 
 import torch
 
+from .compilation import compile_kernel
 from .interfaces import append_history
 from .logging import TrainingLogger
 from .buffer import Replay, Window, WindowArchive
@@ -64,7 +65,7 @@ class SuperMimicRunner:
                              history_storage=self.execution.replay_history_storage,
                              device_sampling=self.execution.cuda_graph)
         self.archive = WindowArchive(cfg.archive_size, self.device)
-        self._configure_sampling()
+        self._configure_execution()
         self.control_enabled = bool(control_enabled)
         self.iteration = self.real_steps = self.imagined_steps = 0
         self.prefill_real_steps = 0
@@ -79,7 +80,6 @@ class SuperMimicRunner:
         self.episode_returns = torch.zeros(env.num_envs, device=self.device)
         self.episode_lengths = torch.zeros(env.num_envs, dtype=torch.long, device=self.device)
         self.completed_episodes = EpisodeWindow(env.num_envs, self.device)
-        self._collection_metric_validity = {}
         self._safe_policy = None
         self._collapse_strikes = 0
         self._guard_falls = 0.0
@@ -102,9 +102,10 @@ class SuperMimicRunner:
             learner_type = CudaGraphLearner
         return learner_type(self.task, self.actor, self.model, self.critic, self.config, execution=self.execution)
 
-    def _configure_sampling(self):
-        """构造和恢复共用执行选择；模式切换时旧回放本就不参与恢复。"""
-        self._model_sampling = self._seed_sampling = None
+    def _configure_execution(self):
+        """采样与更新使用同一图，恢复时重建静态地址和捕获生命周期。"""
+        self._model_training = None
+        self._policy_training = {}
         if self.replay.device_sampling != self.execution.cuda_graph:
             self.replay = Replay(self.spec, self.env.num_envs, self.config.replay_capacity, self.device,
                                  history_storage=self.execution.replay_history_storage,
@@ -112,8 +113,63 @@ class SuperMimicRunner:
         if self.execution.cuda_graph:
             from .cuda_graph import CapturedUpdate
 
-            self._model_sampling = CapturedUpdate(self._sample_model_device, self.device)
-            self._seed_sampling = CapturedUpdate(self._sample_seed_device, self.device)
+            self._model_training = CapturedUpdate(self._fit_models, self.device)
+            self._policy_graph_generation = self.learner.graph_generation
+            self._model_graph_generation = self.learner.model_graph_generation
+        self._collection_policy = (compile_kernel(self.actor, self.config.compile_backend)
+                                   if self.config.compile_imagination else self.actor)
+        self._collection_update = (compile_kernel(self._advance_collection, self.config.compile_backend)
+                                   if self.config.compile_imagination else self._advance_collection)
+
+    def _fit_models(self):
+        """将整轮采样、全部世界模型更新与设备指标累计留在同一计算链。"""
+        totals = ModelMetrics()
+        for _ in range(self.config.wm_updates):
+            window = self._model_batch(device_indices=self.execution.cuda_graph)
+            totals.add(self.learner.fit_model(window))
+        return totals.mean(self.config.wm_updates)
+
+    def fit_model_updates(self):
+        with self.timing.section("wm_sampling_update"):
+            if self.execution.cuda_graph:
+                if self._model_graph_generation != self.learner.model_graph_generation:
+                    from .cuda_graph import CapturedUpdate
+
+                    self._model_training = CapturedUpdate(self._fit_models, self.device)
+                    self._model_graph_generation = self.learner.model_graph_generation
+                metrics = self._model_training()
+                metrics = {**metrics, "cuda_graph/model_captured": float(self._model_training.graph is not None),
+                           "cuda_graph/model_replays": self._model_training.replays}
+                return metrics
+            return self._fit_models()
+
+    def improve_policy(self, *, freeze_actor):
+        if self.execution.cuda_graph:
+            from .cuda_graph import CapturedUpdate
+
+            if self._policy_graph_generation != self.learner.graph_generation:
+                self._policy_training.clear()
+                self._policy_graph_generation = self.learner.graph_generation
+            if freeze_actor not in self._policy_training:
+                self._policy_training[freeze_actor] = CapturedUpdate(
+                    lambda: self.learner.improve(self._sample_seed_device(), freeze_actor=freeze_actor), self.device)
+            update = self._policy_training[freeze_actor]
+            with self.timing.section("policy_sampling_update"):
+                metrics = update()
+            return {**metrics, "cuda_graph/actor_captured": float(update.graph is not None),
+                    "cuda_graph/critic_captured": float(update.graph is not None),
+                    "cuda_graph/actor_replays": update.replays, "cuda_graph/critic_replays": update.replays}
+        with self.timing.section("seed_sampling"):
+            seed = self.replay.sample_seeds(self.config.imag_batch)
+        return self.learner.improve(seed, freeze_actor=freeze_actor, timing=self.timing)
+
+    def _training_setup_pending(self, control_requested, freeze_actor):
+        if not self.execution.cuda_graph:
+            return False
+        return (self._model_training.graph is None
+                or self._model_graph_generation != self.learner.model_graph_generation or control_requested and (
+            self._policy_graph_generation != self.learner.graph_generation
+            or freeze_actor not in self._policy_training or self._policy_training[freeze_actor].graph is None))
 
     def configure_logging(self, *, target_iteration, log_interval=1):
         self.target_iteration = int(target_iteration)
@@ -145,7 +201,6 @@ class SuperMimicRunner:
         self.episode_returns.zero_()
         self.episode_lengths.zero_()
         self.completed_episodes.clear()
-        self._collection_metric_validity = {}
         self.replay.clear()
         self.archive.clear()
         if self.driver is not None or self.expert is not None:
@@ -166,30 +221,21 @@ class SuperMimicRunner:
             observation = self.history[:, -1]
             heightmap = self.task.actor_heightmap(self.current)
             mask = self.task.actor_mask(self.current)
-            action = self._override_actions(self.actor(self.history, heightmap, mask), self.history, observation)
+            action = self._override_actions(self._collection_policy(self.history, heightmap, mask), self.history, observation)
             noise = cfg.action_noise * torch.randn_like(action)
             noise.masked_fill_(self.deterministic_collection_mask[:, None], 0)
             action = action + noise
             result = self.env.step(action)
             done = result.terminated | result.truncated
-            with self.timing.section("collection_statistics"):
-                self.actor.update_statistics(self.history)
-                self.model.update_stats(self.current, action, result.final_state)
+            with self.timing.section("collection_tensor_update"):
+                history = self._collection_update(self.current, self.history, action, result)
             with self.timing.section("replay_history_write"):
                 self.replay.add(self.current, self.history, action, result)
-            with self.timing.section("collection_episodes"):
-                self.episode_returns.add_(result.reward)
-                self.episode_lengths.add_(1)
-                reset_steps.add_(done.any())
-                self.completed_episodes.append(self.episode_returns, self.episode_lengths, done)
-                self.episode_returns.masked_fill_(done, 0)
-                self.episode_lengths.masked_fill_(done, 0)
-            frame = self.task.observe(result.next_state, noisy=True)
-            history = append_history(self.history, frame)
-            self.history = torch.where(done[:, None, None], frame[:, None].expand_as(history), history)
+            reset_steps.add_(done.any())
+            self.history = history
             if self.driver is not None or self.expert is not None:
                 self._reset_drivers(done)
-            self.current = result.next_state.detached_clone()
+            self.current = result.next_state
             reward_sum += result.reward.mean()
             failure_count += result.terminated.sum()
             timeout_count += (result.truncated & ~result.terminated).sum()
@@ -202,12 +248,22 @@ class SuperMimicRunner:
         metrics.update(real_reward=reward_sum / steps, failures=failure_count, timeouts=timeout_count,
                        reset_steps=reset_steps)
         metrics["episode/completed"] = failure_count + timeout_count
-        episode_metrics, self._collection_metric_validity = self.completed_episodes.metrics(self.task.dt)
-        metrics.update(episode_metrics)
         return metrics
 
-    def _sample_model_device(self):
-        return self._model_batch(device_indices=True)
+    @torch.no_grad()
+    def _advance_collection(self, state, history, action, result):
+        """编译统计与历史推进，env.step与回放环的主机游标留在调用方。"""
+        self.actor.update_statistics(history)
+        self.model.update_stats(state, action, result.final_state)
+        done = result.terminated | result.truncated
+        self.episode_returns.add_(result.reward)
+        self.episode_lengths.add_(1)
+        self.completed_episodes.append(self.episode_returns, self.episode_lengths, done)
+        self.episode_returns.masked_fill_(done, 0)
+        self.episode_lengths.masked_fill_(done, 0)
+        frame = self.task.observe(result.next_state, noisy=True)
+        following = append_history(history, frame)
+        return torch.where(done[:, None, None], frame[:, None].expand_as(following), following)
 
     def _sample_seed_device(self):
         return self.replay.sample_seeds(self.config.imag_batch, device_indices=True)
@@ -219,7 +275,9 @@ class SuperMimicRunner:
         uniform = cfg.wm_batch - prioritized - archived
         parts = [self.replay.sample_windows(uniform, cfg.wm_window, device_indices=device_indices)] if uniform else []
         populated = self.archive.size > 0
-        fallback = self.replay.sample_windows(archived, cfg.wm_window, device_indices=device_indices) if archived else None
+        if archived:
+            archive_rows, archive_starts = self.replay.sample_window_indices(
+                archived, cfg.wm_window, device_indices=device_indices)
         candidates = self.replay.sample_windows(4 * max(prioritized, 1), cfg.wm_window, device_indices=device_indices)
         scores, worthy = self.task.replay_selection(candidates)
         keep = worthy & (torch.rand_like(scores) < cfg.archive_keep_prob)
@@ -228,7 +286,8 @@ class SuperMimicRunner:
         if prioritized:
             parts.append(candidates.index(chosen))
         if archived:
-            parts.append(self.archive.sample_or(fallback, populated))
+            parts.append(self.archive.sample_or_replay(
+                self.replay, archive_rows, archive_starts, cfg.wm_window, populated))
         return Window.concatenate(parts) if len(parts) > 1 else parts[0]
 
     def _collapse_guard(self, metrics):
@@ -301,10 +360,7 @@ class SuperMimicRunner:
             frozen = self.iteration <= self.learner.actor_frozen_until
             if self.execution.detailed_timing:
                 phase = "actor_frozen" if control_requested and frozen else "training" if control_requested else "model_warmup"
-                setup = self.learner.timing_setup_pending(control_enabled=control_requested, freeze_actor=frozen)
-                if self._model_sampling is not None:
-                    setup = (setup or self._model_sampling.graph is None
-                             or control_requested and self._seed_sampling.graph is None)
+                setup = self._training_setup_pending(control_requested, frozen)
                 self.timing.begin_iteration(self.iteration, phase, setup=setup)
             # 累加器跨learn调用保留余量，默认依次采2、3步。
             self._collect_step_accumulator += self.config.collect_steps
@@ -316,25 +372,11 @@ class SuperMimicRunner:
             timer.mark("collection")
             self.learner.schedule(self.iteration)
             enabled = False
-            model_metrics = ModelMetrics(compile_backend=self.config.compile_backend
-                                         if self.execution.cuda_graph else None)
-            for _ in range(self.config.wm_updates):
-                with self.timing.section("wm_sampling"):
-                    window = self._model_sampling() if self._model_sampling is not None else self._model_batch()
-                with self.timing.section("wm_update"):
-                    model_metrics.add(self.learner.fit_model(window))
-                del window
-            metrics.update(model_metrics.mean(self.config.wm_updates))
+            metrics.update(self.fit_model_updates())
             timer.mark("model")
             if self.control_enabled and self.iteration > self.learner.policy_start:
                 enabled = True
-                with self.timing.section("seed_sampling"):
-                    seed = self._seed_sampling() if self._seed_sampling is not None else self.replay.sample_seeds(self.config.imag_batch)
-                if self.execution.detailed_timing:
-                    policy_metrics = self.learner.improve(seed, freeze_actor=frozen, timing=self.timing)
-                else:
-                    policy_metrics = self.learner.improve(seed, freeze_actor=frozen)
-                del seed
+                policy_metrics = self.improve_policy(freeze_actor=frozen)
                 metrics.update(policy_metrics)
                 metrics["control/actor_frozen"] = float(frozen)
                 self.imagined_steps += self.config.horizon * self.config.imag_batch
@@ -354,10 +396,10 @@ class SuperMimicRunner:
                               "replay/transitions": self.replay.size * self.env.num_envs,
                               "replay/fill_fraction": self.replay.size / self.replay.capacity,
                               "replay/archive_size": self.archive.size})
-            metric_window.add(metrics, validity=self._collection_metric_validity)
-            phase_timers.append((timer, enabled))
             flush = (self.session_iterations == 0 or self.iteration % self.execution.metric_interval == 0
                      or self.iteration % self.config.collapse_interval == 0 or local_iteration == iterations - 1)
+            metric_window.add(metrics)
+            phase_timers.append((timer, enabled))
             self.session_iterations += 1
             if not flush:
                 self.timing.end_iteration(time.perf_counter() - started, 0.0, completed=False)
@@ -365,6 +407,9 @@ class SuperMimicRunner:
             # 展示数据仅在窗口边界集中回读，原护栏轮次也强制结束窗口。
             with self.timing.section("metric_read", cuda=False):
                 aggregate, validity = metric_window.aggregate()
+                episode_metrics, episode_validity = self.completed_episodes.metrics(self.task.dt)
+                aggregate.update(episode_metrics)
+                validity.update(episode_validity)
                 metrics = read_metrics(aggregate, self.device, validity=validity)
             collection_time = sum(item.seconds("start", "collection") for item, _ in phase_timers)
             model_time = sum(item.seconds("collection", "model") for item, _ in phase_timers)
@@ -484,7 +529,7 @@ class SuperMimicRunner:
         self.replay.clear()
         self.archive.clear()
         self.elapsed = 0.0
-        self._configure_sampling()
+        self._configure_execution()
         self.prefill_real_steps = 0
         self.session_iterations = 0
         self._collapse_strikes = 0

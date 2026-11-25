@@ -18,23 +18,32 @@ class EpisodeWindow:
     """在设备上保留最近100个完成回合，同步结束时按环境编号排列。"""
 
     def __init__(self, num_envs, device):
-        self.records = torch.zeros(100, 2, dtype=torch.float64, device=device)
+        self._storage = torch.zeros(100 + num_envs, 2, dtype=torch.float64, device=device)
+        self.records = self._storage[:100]
         self.valid = torch.zeros(100, dtype=torch.bool, device=device)
-        self.order = torch.arange(100 + num_envs, device=device)
+        self.clock = torch.zeros((), dtype=torch.long, device=device)
+        self.size = torch.zeros_like(self.clock)
+        self.rows = torch.arange(num_envs, device=device)
+        self.slots = torch.arange(100, device=device)
 
     def clear(self):
         self.valid.zero_()
+        self.clock.zero_()
+        self.size.zero_()
 
     @torch.no_grad()
     def append(self, returns, lengths, done):
         # 长度先转FP32，保持原cpu().tolist()之前的转换口径。
         candidates = torch.stack((returns.double(), lengths.float().double()), dim=-1)
-        records = torch.cat((self.records, candidates))
-        valid = torch.cat((self.valid, done))
-        keys = torch.where(valid, self.order, -1)
-        selected = keys.topk(100, sorted=True).indices.flip(0)
-        self.records.copy_(records[selected])
-        self.valid.copy_(valid[selected])
+        rank = done.long().cumsum(0) - 1
+        count = done.sum()
+        # 同步结束超过100行时只写最新100行，环内地址唯一且按环境编号保序。
+        accepted = done & (rank >= count - 100)
+        indices = torch.where(accepted, (self.clock + rank) % 100, 100 + self.rows)
+        self._storage[indices] = candidates
+        self.clock.add_(count)
+        self.size.add_(count).clamp_max_(100)
+        self.valid.copy_(self.slots < self.size)
 
     def metrics(self, dt):
         count = self.valid.sum()
