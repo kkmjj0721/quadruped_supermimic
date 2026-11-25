@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
-from copy import deepcopy
 from pathlib import Path
 
 import torch
@@ -15,8 +14,8 @@ from mjlab.managers.command_manager import NullCommandManager
 from mjlab.utils.wrappers import VideoRecorder
 
 from agents.supermimic.interfaces import append_history
-from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
+from ..config.env_cfgs import resolve_go2_supermimic_cfg
 from ..config.train_cfg import TASK_MODES
 from .checkpoints import build_playback_policy, load_playback_source
 from .transition_adapter import Go2TransitionAdapter
@@ -229,8 +228,7 @@ def make_playback(task_id, *, checkpoint_file=None, agent="trained", num_envs=No
     if video and not trained:
         print("[WARN] Video recording with dummy agents is disabled (no checkpoint/log_dir).")
     source = load_playback_source(task_id, checkpoint) if trained else None
-    cfg = deepcopy(source.cfg) if source is not None else Go2ReferenceCfg()
-    cfg.terrain.mode = TASK_MODES[task_id]
+    cfg = resolve_go2_supermimic_cfg(source.cfg if trained else None, terrain_mode=TASK_MODES[task_id])
     cfg.env.num_envs = num_envs if num_envs is not None else 1
     torch.manual_seed(cfg.env.seed)
     adapter = _PlaybackTransitionAdapter(

@@ -45,7 +45,7 @@ class Go2WorldModel(WorldModel):
         return torch.cat((core, scale[GENERALIZED_DELTA_DIM:]), -1)
 
     def supervised_loss(self, predicted, target, delta, scale):
-        """连续物理量用标准化均方误差，瞬时／历史足接触各占半份BCE，绊脚与小腿事件占一份。"""
+        """连续物理量用标准化均方误差，瞬时／历史足接触各占半份BCE，绊脚与非期望接触事件占一份。"""
         error = self.task.model_error(predicted, target) / scale
         continuous = torch.cat((error[:, :MODEL_CONTACT.start], error[:, MODEL_CONTACT.stop:MODEL_HISTORY_CONTACT.start]), -1)
         contact_logits = torch.cat((delta[:, MODEL_CONTACT], delta[:, MODEL_HISTORY_CONTACT]), -1)

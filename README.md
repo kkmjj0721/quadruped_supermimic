@@ -2,7 +2,7 @@
 
 基于 **MjLab** 的四足机器人运动控制项目，面向 **Unitree Go2**，支持平地与粗糙地形的速度跟踪、策略训练、可视化播放和策略导出。
 
-提供 PROOF 高程图教师的普通地形训练任务，采用官方 `proof-loco@ae910b8` 教师网络与奖励，使用 SuperMimic 可微世界模型训练。
+提供 PROOF 高程图教师的一阶段普通地形和二阶段 Parkour 任务，使用 SuperMimic 可微世界模型训练。
 
 | 算法 | 平地任务 | 粗糙地形任务 |
 | --- | --- | --- |
@@ -28,11 +28,13 @@ uv run --no-sync python scripts/train.py Unitree-Go2-SuperMimic-Rough \
   --device cuda:0 --num-envs 64 --max-iterations 1000
 ```
 
-平地使用表中对应的 `Flat` 任务。当前 `Rough` 包含原有地形、正反金字塔斜坡及梅花桩，保持在普通地形阶段。环境数与训练轮数按资源和实验目标调整；至少使用 2 个并行环境，网络、续训与导出接口见 [算法与任务说明](agents/README.md)。
+平地使用表中对应的 `Flat` 任务。当前 `Rough` 包含原有十类地形及正反金字塔斜坡，保持在普通地形阶段。环境数与训练轮数按资源和实验目标调整；至少使用 2 个并行环境，网络、续训与导出接口见 [算法与任务说明](agents/README.md)。
 
 默认产物目录：
 
 - **SuperMimic**：`logs/supermimic/go2_supermimic/<运行标识>/`
+
+二阶段使用独立的 `Unitree-Go2-SuperMimic-Parkour` 任务，从一阶段 Rough 检查点热启动。参考地图和命令见[二阶段用法](agents/README.md#二阶段-parkour)。
 
 ## 🎮 策略播放
 

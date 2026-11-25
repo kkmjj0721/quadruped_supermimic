@@ -11,6 +11,7 @@ import math
 from pathlib import Path
 
 from agents.supermimic.config import SuperMimicConfig
+from src.config.go2.go2_parkour_config import parkour_config
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
 
@@ -53,7 +54,7 @@ def apply_settings(target, values: dict, prefix: str = "", *, replace_mappings: 
         setattr(target, name, value)
 
 
-def load_task_config(path: Path, *, require_snapshot: bool = False) -> tuple[Go2ReferenceCfg, dict]:
+def load_task_config(path: Path, *, require_snapshot: bool = False, terrain_mode: str | None = None) -> tuple[Go2ReferenceCfg, dict]:
     """仅在外部 JSON 入口检查并装配任务配置，返回同次读取的原始元数据。"""
     payload = json.loads(path.read_text(encoding="utf-8"))
     json.dumps(payload, allow_nan=False)
@@ -62,6 +63,12 @@ def load_task_config(path: Path, *, require_snapshot: bool = False) -> tuple[Go2
     wrapped = "config" in payload
     settings = payload["config"] if wrapped else payload
     cfg = Go2ReferenceCfg()
+    # 完整快照使用自身的阶段；局部覆盖以命令行目标任务的默认值为基础。
+    configured_mode = settings.get("terrain", {}).get("mode", terrain_mode)
+    if configured_mode == "parkour":
+        if terrain_mode in ("flat", "rough"):
+            raise ValueError("A Parkour configuration requires the Parkour task; supply a first-stage --task-config")
+        cfg = parkour_config(cfg)
     sections = set(cfg.to_dict())
     if require_snapshot and (not wrapped or not sections.issubset(settings)):
         raise ValueError(f"A complete task configuration snapshot is required: {path}")
@@ -88,8 +95,15 @@ def validate_config(cfg) -> None:
             raise ValueError(f"Task parameter must be positive and finite: {name}")
     if not 0 < cfg.reward.fall_angle < math.pi:
         raise ValueError("Fall angle must be between zero and pi")
-    if cfg.terrain.mode not in ("flat", "rough"):
+    if cfg.terrain.mode not in ("flat", "rough", "parkour"):
         raise ValueError("Unsupported SuperMimic terrain mode")
+    if cfg.terrain.mode == "parkour" and (
+        (cfg.terrain.core_rows, cfg.terrain.num_cols) != (10, 20)
+        or tuple(cfg.terrain.patch_size_m) != (8.0, 8.0)
+        or cfg.terrain.outer_flat_width_m != 20.0
+        or cfg.terrain.field_resolution_m != 0.02
+    ):
+        raise ValueError("The PROOF Parkour asset requires 10x20 tiles of 8x8 m, a 20 m border and a 0.02 m grid")
     if tuple(cfg.terrain.scan_size_m) != (1.7, 0.8) or cfg.terrain.scan_resolution_m != 0.1:
         raise ValueError("PROOF teacher heightmap requires a 1.7x0.8m grid with 0.1m spacing")
     if not 0 <= cfg.teacher.exteroceptive_dropout <= 1:

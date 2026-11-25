@@ -17,11 +17,9 @@ import numpy as np
 import torch
 from mjlab.terrains import TerrainEntityCfg, TerrainGeneratorCfg
 
-from .stepping_stones import SteppingStonesTerrainCfg
-
 
 def reference_generator(cfg) -> TerrainGeneratorCfg:
-    """复用ri_5036_him地形，追加普通地形阶段的正反斜坡与梅花桩。"""
+    """复用ri_5036_him地形，追加普通地形阶段的正反金字塔斜坡。"""
     from mjlab.terrains import BoxRandomGridTerrainCfg
     from mjlab.terrains.config import ROUGH_TERRAINS_CFG
 
@@ -54,14 +52,6 @@ def reference_generator(cfg) -> TerrainGeneratorCfg:
             slopes[name], slope_range=(0.0, 0.45), platform_width=platform_width,
             border_width=0.10, proportion=0.10,
         )
-    # 末尾追加以保留旧地块随机流；归一化后梅花桩占10%，原地形相对比例不变。
-    # 独立递增净间隙，四边各留0.25米平地，平台出口与本档桩间等缝。
-    terrain.sub_terrains["stepping_stones"] = SteppingStonesTerrainCfg(
-        proportion=sum(term.proportion for term in terrain.sub_terrains.values()) / 9,
-        stone_size_range=(0.25, 0.35), stone_distance_range=(0.10, 0.15),
-        stone_height=0.10, stone_height_variation=0.02,
-        floor_depth=0.50, platform_width=2.5, border_width=0.25,
-    )
     return terrain
 
 
@@ -80,14 +70,18 @@ def clean_look(terrain):
 
 
 class TerrainMap:
-    """十三种一阶段地形各占一列，六行按生成器difficulty递增。"""
+    """按任务地形集合分列，各行按生成器difficulty递增。"""
 
     def __init__(self, cfg):
         self.cfg = deepcopy(cfg)
         self.plane = cfg.mode == "flat"
         self.size = tuple(cfg.patch_size_m)
-        self.generator = None if self.plane else reference_generator(cfg)
-        self.family_names = ("flat",) if self.plane else tuple(self.generator.sub_terrains)
+        if cfg.mode == "parkour":
+            from .parkour_terrains import parkour_generator
+            self.generator, self.family_names = parkour_generator(cfg)
+        else:
+            self.generator = None if self.plane else reference_generator(cfg)
+            self.family_names = ("flat",) if self.plane else tuple(self.generator.sub_terrains)
         weights = (1.,) if self.plane else tuple(term.proportion for term in self.generator.sub_terrains.values())
         total_weight = sum(weights)
         self.proportions = tuple(weight / total_weight for weight in weights)
@@ -320,6 +314,9 @@ class TerrainSurface:
         self = cls()
         self.device = torch.device(device)
         cfg = terrain_map.cfg
+        if cfg.mode == "parkour":
+            from .parkour_terrains import ParkourSurface
+            return ParkourSurface.from_model(model, device, terrain_map)
         origins = terrain_map.origins.reshape(-1, 3).cpu().numpy()
         self.origin = (float(origins[:, 0].min() - cfg.field_half_m), float(origins[:, 1].min() - cfg.field_half_m))
         upper = (float(origins[:, 0].max() + cfg.field_half_m), float(origins[:, 1].max() + cfg.field_half_m))

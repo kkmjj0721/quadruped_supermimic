@@ -37,15 +37,13 @@ def make_go2_supermimic_env_cfg(
         ContactSensorCfg(
             name="feet_ground_contact", primary=ContactMatch(mode="geom", pattern=feet, entity="robot"),
             secondary=ContactMatch(mode="body", pattern="terrain"), fields=("found", "force"),
-            reduce="netforce", num_slots=1, history_length=cfg.control.decimation,
+            reduce="netforce", num_slots=1, track_air_time=True, history_length=cfg.control.decimation,
         ),
         ContactSensorCfg(
-            name="calf_ground_contact",
-            primary=ContactMatch(mode="geom", pattern=r"^(FR|FL|RR|RL)_calf_collision\d*$", entity="robot"),
-            fields=("force",), reduce="netforce", num_slots=1, history_length=cfg.control.decimation,
-        ),
-        ContactSensorCfg(
-            name="base_ground_contact", primary=ContactMatch(mode="body", pattern="base", entity="robot"),
+            name="undesired_contact",
+            primary=ContactMatch(mode="geom", entity="robot", pattern=(
+                r"^(FR|FL|RR|RL)_(hip|thigh|calf)_collision\d*$", r"^(base|head)_collision\d*$",
+            )),
             fields=("force",), reduce="netforce", num_slots=1, history_length=cfg.control.decimation,
         ),
     )
@@ -88,6 +86,11 @@ def make_go2_supermimic_env_cfg(
             },
         ),
     }
+    if cfg.terrain.mode == "parkour":
+        from .mdp.parkour import reset_parkour_joints
+
+        events["reset_joints"] = EventTermCfg(func=reset_parkour_joints, mode="reset",
+                                             params={"scale_range": cfg.reset.joint_scale})
     if cfg.domain_randomization.enabled:
         domain = cfg.domain_randomization
         for name, axis, distribution, bounds in (

@@ -5,6 +5,8 @@ import torch
 import numpy as np
 from mjlab.terrains.terrain_entity import _proportional_counts
 
+from .parkour import FORWARD_FAMILIES
+
 
 class CommandCurriculum:
     """只提供固定范围与进度计数，不进行速度课程。"""
@@ -14,9 +16,8 @@ class CommandCurriculum:
         ranges = torch.tensor(cfg.initial_ranges, dtype=torch.float32, device=self.device)
         self.bounds = ranges.repeat(len(families), 1, 1)
         for index, name in enumerate(families):
-            if name == "stepping_stones":
-                self.bounds[index, 0] = ranges[0].clamp_min(0)
-                self.bounds[index, 1] = 0
+            if name in FORWARD_FAMILIES:
+                self.bounds[index] = ranges.new_tensor(((0.7, 1.1), (0.0, 0.0), (-0.3, 0.3)))
         self.standing_probability = cfg.rel_standing_envs
         self.control_steps = 0
 
@@ -80,12 +81,18 @@ class TerrainCurriculum:
             return
         terrain = env.scene.terrain
         position = env.scene["robot"].data.root_link_pos_w[ids, :2]
-        distance = (position - self.episode_start_pos_w[ids]).norm(dim=-1)
-        time_left = env.max_episode_length_s - env.episode_length_buf[ids] * env.step_dt
-        commanded_distance = (self.commanded_displacement_w[ids].norm(dim=-1)
-                              + command[ids, :2].norm(dim=-1) * time_left.clamp_min(0))
         terrain_distance = (position - env.scene.env_origins[ids, :2]).norm(dim=-1)
-        move_up = (terrain_distance > self.map.size[0] / 2) & (commanded_distance >= 1.0)
+        move_up = terrain_distance > self.map.size[0] / 2
+        if self.map.cfg.mode == "parkour":
+            # LocoLab 用结束时刻的命令和完整回合时长计算应走距离。
+            distance = terrain_distance
+            commanded_distance = command[ids, :2].norm(dim=-1) * env.max_episode_length_s
+        else:
+            distance = (position - self.episode_start_pos_w[ids]).norm(dim=-1)
+            time_left = env.max_episode_length_s - env.episode_length_buf[ids] * env.step_dt
+            commanded_distance = (self.commanded_displacement_w[ids].norm(dim=-1)
+                                  + command[ids, :2].norm(dim=-1) * time_left.clamp_min(0))
+            move_up &= commanded_distance >= 1.0
         move_down = (distance < commanded_distance * 0.5) & ~move_up
         has_episode = (env.episode_length_buf[ids] > 0) & (env.common_step_counter > 0)
         move_up &= has_episode

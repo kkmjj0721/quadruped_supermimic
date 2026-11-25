@@ -87,7 +87,7 @@ class Go2ReferenceCfg(BaseConfig):
         heightmap_dim = 162
 
     class teacher:
-        """普通地形回合级高程latent遮蔽；平地与梅花桩始终开启高程。"""
+        """普通地形回合级高程latent遮蔽；平地始终开启高程。"""
 
         exteroceptive_dropout = 0.4
 
@@ -199,13 +199,13 @@ class Go2ReferenceCfg(BaseConfig):
         }
 
     class terrain:
-        """Ri-5036 HIM地形追加正反斜坡与梅花桩；难度采用原有行走表现课程。"""
+        """Ri-5036 HIM地形追加正反金字塔斜坡；难度采用原有行走表现课程。"""
 
         mode = "flat"
         seed = None
         patch_size_m = (8.0, 8.0)
         core_rows = 6
-        num_cols = 20  # 沿用参考配置；MjLab课程模式按十三种子地形实际生成十三列。
+        num_cols = 20  # 沿用参考配置；MjLab课程模式按十二种子地形实际生成十二列。
         outer_flat_width_m = 20.0
         max_init_level = 0
         curriculum = True
@@ -252,7 +252,6 @@ class Go2ReferenceCfg(BaseConfig):
         tracking_angular_variance = 0.25
         pose_tracking_gate = True  # main：移动时按实际速度跟踪门控，站立保留原姿态分。
         fall_angle = 1.5
-        base_contact_threshold = 5.0
         command_threshold = 0.1
         stuck_velocity_threshold = 0.1  # PROOF：平移命令高于阈值而body水平速度低于阈值时惩罚。
         stand_still_command_threshold = 0.1  # main：命令平移模长加偏航绝对值不超过阈值时启用。
@@ -280,7 +279,8 @@ class Go2ReferenceCfg(BaseConfig):
             track_ang_vel_z_exp = 1.0
             lin_vel_z_l2 = -1.0
             ang_vel_xy_l2 = -0.05
-            stuck = -1.0
+            body_orientation_l2 = -0.1
+            stuck = -2.0
             stand_still = -2.0  # main：站立关节偏差平方和，保留当前分量门控。
             pose = 0.3
             stand_still_joint_vel_l2 = -0.1
@@ -299,4 +299,4 @@ class Go2ReferenceCfg(BaseConfig):
             feet_stumble = -1.0
             feet_slide = -2.5e-2
             is_alive = 0.1
-            termination_penalty = -100.0
+            termination_penalty = -50.0

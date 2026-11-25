@@ -1,12 +1,15 @@
 # Copyright (c) 2026-2027 zh
 """内容：从任务快照派生PROOF三输入教师的部署坐标、观测与控制语义。"""
 
+from ..mdp.parkour import SPECIAL_FAMILIES
 from ..mdp.state_spec import JOINT_NAMES
 
 
 def deployment_metadata(cfg, *, spec_hash: str, algorithm) -> dict:
     """训练保存与离线导出共享同一份观测、地图及动作定义。"""
     control = cfg.control
+    terrain_masks = ({"always_visible_families": list(SPECIAL_FAMILIES)} if cfg.terrain.mode == "parkour" else
+                     {"flat_family_mask": 1})
     return {
         "spec_hash": spec_hash, "algorithm": "supermimic_proof_teacher",
         "inference_action": "deterministic_mean",
@@ -35,7 +38,7 @@ def deployment_metadata(cfg, *, spec_hash: str, algorithm) -> dict:
                       "formula": "clip(base_z - terrain_z - height_offset_m, -10, 10)", "noise": "none"},
         "exteroceptive_mask": {"shape": [None, 1], "values": [0, 1], "sample": "episode_reset",
                                "drop_probability": cfg.teacher.exteroceptive_dropout,
-                               "flat_family_mask": 1, "stepping_stones_family_mask": 1,
+                               **terrain_masks,
                                "stage": "multiply_height_latent_after_tanh"},
         "actor_input_dim": algorithm.prop_latent_dim + 45 + algorithm.height_latent_dim,
         "actor_input_order": "proprioceptive_latent_normalized_current_frame_masked_height_latent",

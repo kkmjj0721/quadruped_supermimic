@@ -12,6 +12,7 @@ from torch import Tensor
 from agents.supermimic.config import RUNNER_RUNTIME_FIELDS
 from agents.supermimic.interfaces import AlgorithmSpec, TaskState
 
+from .parkour import EDGE_FAMILIES, FORWARD_FAMILIES, PARKOUR_FAMILIES, SPECIAL_FAMILIES
 from .reference_rewards import reference_reward_terms
 from .contact_geometry import ContactGeometry
 from .commands import advance_commands, heading_command, sample_commands
@@ -19,13 +20,13 @@ from .reference_kinematics import Go2Kinematics
 from .reference_rotations import mat_to_quat, mv3, quat_to_mat
 from .structured_dynamics import ResidualDynamics
 from .reference_state import (
-    ANGULAR_BODY, AUXILIARY, BASE_CONTACT_FORCE, FOOT_CONTACT, CONTEXT_COM, FEET,
+    ANGULAR_BODY, AUXILIARY, FOOT_CONTACT, CONTEXT_COM, FEET,
     GENERALIZED_DELTA_DIM, GRAVITY, HEIGHT, JOINT_ACCELERATION, JOINT_OFFSET,
     JOINT_TORQUE, JOINT_VELOCITY, MODEL_CONTACT, MODEL_EVENTS, MODEL_HISTORY_CONTACT, PHYSICAL_DIM, POSE,
     ROBOT_STATE, VELOCITY_HEADING, body_planar_velocity, body_vertical_velocity, yaw_rotate_inverse,
 )
 from .state_spec import (
-    AIR_TIME, COMMAND_OVERRIDE, COMMAND_TIMER, CONTACT, CONTACT_TIME, CONTEXT_DIM,
+    AIR_TIME, COMMAND_OVERRIDE, COMMAND_TIMER, CONTACT, CONTACT_BODY_NAMES, CONTACT_TIME, CONTEXT_DIM, PARKOUR_CONTEXT_DIM,
     CONTEXT_ENCODER_BIAS, CONTEXT_EXTEROCEPTIVE_MASK, ELAPSED_TIME, FIRST_CONTACT,
     FOOT_NAMES, FORWARD, HEADING_TARGET, LAST_AIR_TIME, LAST_CONTACT_TIME,
     JOINT_NAMES, MEMORY_DIM, PREVIOUS_ACTION, PREVIOUS_PREVIOUS_ACTION, STANDING,
@@ -40,14 +41,18 @@ def build_go2_task_spec(cfg, geometry_hash, default_joint_pos: Tensor, joint_lim
         config["algo"].pop(name)
     payload = {"task": config, "geometry": geometry_hash, "default_joint_pos": default_joint_pos.cpu().tolist(),
                "joint_limits": joint_limits.cpu().tolist(),
-               "layout": "proof_teacher_physical147_quat4_memory54_context27_critic285_tgi_contacts_v4",
+               "layout": "proof_teacher_physical164_quat4_memory54_context27_critic285_tgi_contacts_v5",
                "contact_force_frame": "world_force_on_robot", "dynamics": "blinkmimic_residual_fk_quaternion_v1"}
+    context_dim = CONTEXT_DIM
+    if cfg.terrain.mode == "parkour":
+        context_dim = PARKOUR_CONTEXT_DIM
+        payload["layout"] = "proof_parkour_physical164_quat4_memory54_context28_critic285_edges_v2"
     semantic_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
     return AlgorithmSpec(
         state_dim=PHYSICAL_DIM + 4, delta_dim=PHYSICAL_DIM - 45, action_dim=12,
-        observation_dim=45, privileged_dim=cfg.env.num_critic_obs, context_dim=CONTEXT_DIM,
+        observation_dim=45, privileged_dim=cfg.env.num_critic_obs, context_dim=context_dim,
         memory_dim=MEMORY_DIM, command_dim=3, heightmap_dim=heightmap_dim, history_length=cfg.env.num_obs_history,
-        semantic_id="go2_proof_teacher_tgi_a64be1f_residual_fk_v4:" + semantic_hash,
+        semantic_id="go2_proof_teacher_tgi_a64be1f_residual_fk_v5:" + semantic_hash,
         model_id="supermimic_proof_teacher_v2")
 
 
@@ -60,6 +65,14 @@ class Go2ReferenceTaskModel:
         self.cfg = deepcopy(cfg)
         self.device = torch.device(device)
         self.surface = surface
+        self.parkour = cfg.terrain.mode == "parkour"
+        if self.parkour:
+            self.forward_families, self.special_families, self.edge_families = (
+                torch.tensor([name in group for name in PARKOUR_FAMILIES], device=self.device)
+                for group in (FORWARD_FAMILIES, SPECIAL_FAMILIES, EDGE_FAMILIES))
+            # 作者所用 URDF 的足部固定关节位于 calf 系 (0, 0, -0.213)，足部无额外旋转。
+            self.volume_offsets = torch.tensor(
+                [(0., y, -.213 + z) for y in (-.01, .01) for z in (-.01, .01)], device=self.device)
         self.dt = cfg.sim.timestep * cfg.control.decimation
         self.physical_dim = PHYSICAL_DIM
         self.auxiliary = AUXILIARY
@@ -104,11 +117,11 @@ class Go2ReferenceTaskModel:
         self.hip_ids = torch.tensor(hip_ids, dtype=torch.long, device=self.device)
         self.knee_ids = torch.tensor(knee_ids, dtype=torch.long, device=self.device)
         self.foot_ids = torch.tensor(foot_ids, dtype=torch.long, device=self.device)
-        # 每条calf在当前MJCF有两个独立碰撞体；足端几何不参与calf接触计数。
-        names = env.scene["calf_ground_contact"].primary_names
-        self.calf_geom_ids = torch.tensor(
-            [[names.index(f"{leg}_calf_collision{index}") for index in (1, 2)] for leg in FOOT_NAMES],
-            device=self.device)
+        # 按部位合并碰撞体；base包含两个头部几何，足端几何不参与计数。
+        names = env.scene["undesired_contact"].primary_names
+        self.contact_body_ids = torch.tensor(
+            [CONTACT_BODY_NAMES.index("base" if name.startswith("head_collision") else name.split("_collision")[0])
+             for name in names], device=self.device)
         self.actuator_ids = robot.indexing.ctrl_ids
         model = env.sim.mj_model
         ids = self.actuator_ids.cpu().numpy()
@@ -123,10 +136,11 @@ class Go2ReferenceTaskModel:
                  data.site_pos_w[:, self.foot_ids])
         relative = [yaw_rotate_inverse(points - position[:, None], yaw[:, None]).flatten(1) for points in limbs]
         height = position[:, 2:3] - self.surface_height(position[:, :2]).unsqueeze(-1)
-        calf_history = env.scene["calf_ground_contact"].data.force_history
-        calf_net = calf_history[:, self.calf_geom_ids].sum(dim=2)
-        calf_force = calf_net.norm(dim=-1).amax(dim=2)
-        base_force = env.scene["base_ground_contact"].data.force_history.norm(dim=-1).amax(dim=(1, 2))[:, None]
+        contact_history = env.scene["undesired_contact"].data.force_history
+        contact_net = contact_history.new_zeros(
+            (contact_history.shape[0], len(CONTACT_BODY_NAMES), contact_history.shape[2], 3),
+        ).index_add(1, self.contact_body_ids, contact_history)
+        contact_force = contact_net.norm(dim=-1).amax(dim=2)
         sim = env.sim.data
         computed_torque = (self.actuator_gain * sim.ctrl[:, self.actuator_ids]
                            + self.actuator_bias[:, 0] + self.actuator_bias[:, 1] * sim.actuator_length[:, self.actuator_ids]
@@ -138,13 +152,13 @@ class Go2ReferenceTaskModel:
         # 标签只在真实传感器边界按官方定义生成，想象不对回归接触力重复做阈值判定。
         stumble = (foot_force[..., :2].norm(dim=-1)
                    > self.cfg.reward.stumble_ratio * foot_force[..., 2].abs()).any(-1, keepdim=True).float()
-        calf_contact = (calf_force > self.cfg.reward.contact_force_threshold).float()
+        undesired_contact = (contact_force > self.cfg.reward.contact_force_threshold).float()
         return torch.cat((height, data.projected_gravity_b, yaw_rotate_inverse(data.root_link_lin_vel_w, yaw),
                           data.root_link_ang_vel_b, data.joint_pos - data.default_joint_pos, data.joint_vel, *relative,
                           position[:, :2], yaw[:, None], data.joint_acc,
                           data.site_lin_vel_w[:, self.foot_ids, :2].flatten(1), foot_contact,
-                          foot_force.flatten(1), data.actuator_force, calf_force, base_force, computed_torque,
-                          history_contact, stumble, calf_contact, data.root_link_quat_w), -1)
+                          foot_force.flatten(1), data.actuator_force, contact_force, computed_torque,
+                          history_contact, stumble, undesired_contact, data.root_link_quat_w), -1)
 
     def world_position(self, state: TaskState) -> Tensor:
         xy = state.physical[:, POSE][:, :2]
@@ -223,12 +237,12 @@ class Go2ReferenceTaskModel:
     # ---------- 回合记忆与接触计时 ----------
 
     def initialize_state(self, physical: Tensor, context: Tensor) -> TaskState:
-        command, timer, heading, standing, forward = sample_commands(self.cfg.commands, context, physical[:, 72])
+        command, timer, heading, standing, forward = sample_commands(self, context, physical[:, 72])
         memory = physical.new_zeros((physical.shape[0], MEMORY_DIM))
         memory[:, COMMAND_TIMER], memory[:, HEADING_TARGET] = timer, heading
         memory[:, STANDING], memory[:, FORWARD] = standing, forward
         memory[:, CONTACT] = physical[:, FOOT_CONTACT]
-        command = heading_command(self.cfg.commands, command, physical[:, 72], heading, standing)
+        command = heading_command(self, context, command, physical[:, 72], heading, standing, forward)
         return TaskState(physical, memory, command, context)
 
     def feet_height(self, physical: Tensor) -> Tensor:
@@ -249,8 +263,7 @@ class Go2ReferenceTaskModel:
         return base_z + feet[..., 2] - ground
 
     def advance(self, state: TaskState, action: Tensor, next_physical: Tensor) -> TaskState:
-        clock = state.memory[:, ELAPSED_TIME] + self.dt
-        command, timer, heading, standing, forward = advance_commands(self.cfg.commands, state, next_physical, self.dt)
+        """想象步用预测的足接触概率推进步态时钟。"""
         contact = next_physical[:, FOOT_CONTACT]
         previous = state.memory[:, CONTACT]
         # 保留原有最大持续耦合计时，不在概率恒定时重复制造落地事件。
@@ -263,8 +276,17 @@ class Go2ReferenceTaskModel:
         first_air = previous - shared
         last_air = first_contact * (state.memory[:, AIR_TIME] + self.dt) + (1 - first_contact) * state.memory[:, LAST_AIR_TIME]
         last_contact = first_air * (state.memory[:, CONTACT_TIME] + self.dt) + (1 - first_air) * state.memory[:, LAST_CONTACT_TIME]
+        return self.advance_with_gait_times(state, action, next_physical, air_time=air_time, contact_time=contact_time,
+                                            last_air=last_air, first_contact=first_contact, last_contact=last_contact)
+
+    def advance_with_gait_times(self, state: TaskState, action: Tensor, next_physical: Tensor, *,
+                                air_time: Tensor, contact_time: Tensor, last_air: Tensor,
+                                first_contact: Tensor, last_contact: Tensor) -> TaskState:
+        """写入本步步态计时，保留瞬时足接触作为下一想象步的初值。"""
+        clock = state.memory[:, ELAPSED_TIME] + self.dt
+        command, timer, heading, standing, forward = advance_commands(self, state, next_physical, self.dt)
         memory = torch.cat((action, clock[:, None], timer[:, None], heading[:, None],
-                            standing.to(action.dtype)[:, None], forward.to(action.dtype)[:, None], contact,
+                            standing.to(action.dtype)[:, None], forward.to(action.dtype)[:, None], next_physical[:, FOOT_CONTACT],
                             air_time, contact_time, state.memory[:, COMMAND_OVERRIDE, None],
                             state.memory[:, PREVIOUS_ACTION], last_air, first_contact, last_contact), -1)
         return TaskState(next_physical, memory, command, state.context)
@@ -334,8 +356,7 @@ class Go2ReferenceTaskModel:
 
     def hard_termination(self, state: TaskState) -> Tensor:
         return ((state.physical[:, 3] > -math.cos(self.cfg.reward.fall_angle))
-                | (self.contact_geometry.body_clearance(state.physical) < 0)
-                | (state.physical[:, BASE_CONTACT_FORCE].squeeze(-1) > self.cfg.reward.base_contact_threshold))
+                | (self.contact_geometry.body_clearance(state.physical) < 0))
 
     def soft_termination(self, state: TaskState) -> Tensor:
         upright_margin = -state.physical[:, 3] - math.cos(self.cfg.reward.fall_angle)

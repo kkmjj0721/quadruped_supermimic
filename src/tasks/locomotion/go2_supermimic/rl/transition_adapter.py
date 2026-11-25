@@ -16,8 +16,9 @@ from agents.supermimic.interfaces import EnvStep
 from ..config.env_cfgs import resolve_go2_supermimic_cfg
 from ..go_supermimic_env_cfg import make_go2_supermimic_env_cfg
 from ..mdp.curriculums import CommandCurriculum, TerrainCurriculum
+from ..mdp.parkour import PARKOUR_FAMILIES, SPECIAL_FAMILIES
 from ..mdp.state_spec import (
-    CONTEXT_DIM, CONTEXT_ENCODER_BIAS, CONTEXT_FRICTION,
+    CONTEXT_DIM, CONTEXT_ENCODER_BIAS, CONTEXT_FRICTION, CONTEXT_TERRAIN_FAMILY, PARKOUR_CONTEXT_DIM,
     CONTEXT_EXTEROCEPTIVE_MASK, CONTEXT_ORIGIN, CONTEXT_RANGES, CONTEXT_ZERO_PROBABILITY,
     COMMAND_OVERRIDE,
 )
@@ -69,9 +70,13 @@ class Go2TransitionAdapter:
                 episode_length_s=self.cfg.env.episode_length_s, device=self.device)
             if not self.map.plane:
                 self.terrain_curriculum.family_ids.copy_(terrain.terrain_types)
-            # 平地沿用源名单例外；梅花桩按任务要求始终开启高程输入。
-            self.mask_eligible = torch.tensor(
-                [name not in ("flat", "stepping_stones") for name in self.map.family_names], device=self.device)
+            self.parkour = self.cfg.terrain.mode == "parkour"
+            if self.parkour:
+                self.column_families = torch.tensor([PARKOUR_FAMILIES.index(name) for name in self.map.family_names],
+                                                    device=self.device)
+            always_visible = SPECIAL_FAMILIES if self.parkour else ("flat",)
+            self.mask_eligible = torch.tensor([name not in always_visible for name in self.map.family_names],
+                                              device=self.device)
             self.terrain_half_size = torch.tensor(
                 (self.map.rows * self.map.size[0] / 2 + 4., self.map.cols * self.map.size[1] / 2 + 4.), device=self.device)
             self.context_version = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -120,7 +125,8 @@ class Go2TransitionAdapter:
         terrain.terrain_types[ids] = self.terrain_curriculum.family_ids[ids] + self.map.rings
 
     def _context(self, ids):
-        context = torch.zeros((ids.numel(), CONTEXT_DIM), dtype=torch.float32, device=self.device)
+        width = PARKOUR_CONTEXT_DIM if self.parkour else CONTEXT_DIM
+        context = torch.zeros((ids.numel(), width), dtype=torch.float32, device=self.device)
         foot = self.raw_env.sim.mj_model.geom("robot/FL_foot_collision").id
         friction = self.raw_env.sim.model.geom_friction
         context[:, CONTEXT_FRICTION] = (friction[ids, foot, 0] if friction.ndim == 3 else friction[foot, 0])
@@ -130,10 +136,13 @@ class Go2TransitionAdapter:
         context[:, CONTEXT_COM] = (ipos[ids, base] if ipos.ndim == 3 else ipos[base]) - nominal
         context[:, CONTEXT_ENCODER_BIAS] = self.robot.data.encoder_bias[ids]
         context[:, CONTEXT_ORIGIN] = self.raw_env.scene.env_origins[ids]
-        bounds, probability = self.command_curriculum.parameters(self.terrain_curriculum.family_ids[ids])
+        columns = self.terrain_curriculum.family_ids[ids]
+        if self.parkour:
+            context[:, CONTEXT_TERRAIN_FAMILY] = self.column_families[columns]
+        bounds, probability = self.command_curriculum.parameters(columns)
         context[:, CONTEXT_RANGES] = bounds
         context[:, CONTEXT_ZERO_PROBABILITY] = probability.squeeze(-1)
-        eligible = self.mask_eligible[self.terrain_curriculum.family_ids[ids]]
+        eligible = self.mask_eligible[columns]
         enabled = torch.rand(ids.numel(), device=self.device) >= self.cfg.teacher.exteroceptive_dropout
         context[:, CONTEXT_EXTEROCEPTIVE_MASK] = (enabled | ~eligible).float()
         return context
@@ -175,7 +184,13 @@ class Go2TransitionAdapter:
         versions = self.context_version.clone()
         _, _, _, raw_truncated, _ = self.raw_env.step(actions)
         physical = self.task.read_physical(self.raw_env).clone()
-        final = self.task.advance(before, actions, physical).detached_clone()
+        feet = self.raw_env.scene["feet_ground_contact"]
+        times = feet.data
+        final = self.task.advance_with_gait_times(
+            before, actions, physical, air_time=times.current_air_time, contact_time=times.current_contact_time,
+            last_air=times.last_air_time, first_contact=feet.compute_first_contact(self.step_dt),
+            last_contact=times.last_contact_time,
+        ).detached_clone()
         if self._play_commands is not None:
             final.command.copy_(self._play_commands)
         terminated = (torch.zeros(self.num_envs, dtype=torch.bool, device=self.device) if self.no_terminations
