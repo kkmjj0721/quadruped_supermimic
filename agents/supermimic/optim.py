@@ -10,12 +10,10 @@ import torch
 from torch import nn
 from torch.optim._muon import _adjust_lr, _zeropower_via_newtonschulz
 
-from .compilation import compile_kernel
-
 
 def _muon_step_tensor_lr(parameters, gradients, momentum_buffers, learning_rate, *, momentum, nesterov,
                          ns_coefficients, ns_steps, eps, weight_decay, adjust_lr_fn):
-    """只编译张量更新，优化器重建与状态恢复不改变本核的编译身份。"""
+    """按来源算术直接执行张量更新，由外层CUDA图统一捕获。"""
     for parameter, gradient, buffer in zip(parameters, gradients, momentum_buffers, strict=True):
         buffer.lerp_(gradient, 1 - momentum)
         update = gradient.lerp(buffer, momentum) if nesterov else buffer
@@ -37,8 +35,7 @@ class MuonAdam:
     """
 
     def __init__(self, model: nn.Module, mlps: list[nn.Module], lr: float, *, betas=(0.9, 0.95),
-                 fused: bool | None = True, capturable: bool = False, io: bool = False, weight_decay: float = 0.1,
-                 compile_backend: str = "inductor"):
+                 fused: bool | None = True, capturable: bool = False, io: bool = False, weight_decay: float = 0.1):
         selected = set()
         for mlp in mlps:
             linears = [layer for layer in mlp.modules() if isinstance(layer, nn.Linear)]
@@ -51,7 +48,6 @@ class MuonAdam:
         adam_rate = torch.tensor(float(lr), device=self.device) if capturable else lr
         self.muon = torch.optim.Muon(muon, lr=muon_rate, weight_decay=weight_decay, adjust_lr_fn="match_rms_adamw")
         self.adam = torch.optim.Adam(adam, lr=adam_rate, betas=betas, fused=fused, capturable=capturable)
-        self._muon_update = compile_kernel(_muon_step_tensor_lr, compile_backend) if capturable else _muon_step_tensor_lr
 
     @property
     def param_groups(self):
@@ -75,10 +71,10 @@ class MuonAdam:
                         state["momentum_buffer"] = torch.zeros_like(parameter.grad, memory_format=torch.preserve_format)
                     gradients.append(parameter.grad)
                     momentum_buffers.append(state["momentum_buffer"])
-                self._muon_update(parameters, gradients, momentum_buffers, group["lr"], momentum=group["momentum"],
-                                  nesterov=group["nesterov"], ns_coefficients=group["ns_coefficients"],
-                                  ns_steps=group["ns_steps"], eps=group["eps"], weight_decay=group["weight_decay"],
-                                  adjust_lr_fn=group["adjust_lr_fn"])
+                _muon_step_tensor_lr(parameters, gradients, momentum_buffers, group["lr"], momentum=group["momentum"],
+                                     nesterov=group["nesterov"], ns_coefficients=group["ns_coefficients"],
+                                     ns_steps=group["ns_steps"], eps=group["eps"], weight_decay=group["weight_decay"],
+                                     adjust_lr_fn=group["adjust_lr_fn"])
         else:
             self.muon.step()
         self.adam.step()

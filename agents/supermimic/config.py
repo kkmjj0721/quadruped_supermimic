@@ -16,7 +16,7 @@ class ExecutionConfig:
 
     imag_microbatch: int = 4096
     critic_microbatch: int = 32768
-    wm_compile: bool = True  # 完整自回归监督及损失。
+    wm_compile: bool = True  # 复用单步监督核，外层自回归保持原顺序。
     fused_adam: bool = True
     cuda_graph: bool = True  # CUDA捕获采样与更新，融合指标累计；CPU运行需显式关闭。
     detailed_timing: bool = False  # 图外记录阶段事件，原有计时指标保持原义。
@@ -66,7 +66,7 @@ class SuperMimicConfig:
     critic_minibatches: int = 4
     grad_clip: float = 1.0
     grad_clip_element: float = 0.1
-    compile_imagination: bool = True  # 四步想象、采集张量、完整lambda-return及critic损失。
+    compile_imagination: bool = True  # 想象单步、采集张量、完整lambda-return及critic损失。
     compile_backend: str = "inductor"
     # 论文表A.5：仅真实采集时逐步逐维独立添加固定高斯噪声，单位为动作缩放前单位。
     action_noise: float = 0.1

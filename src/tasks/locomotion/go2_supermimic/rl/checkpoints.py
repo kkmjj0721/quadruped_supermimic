@@ -61,7 +61,7 @@ def load_playback_source(task_id: str, checkpoint_file: str | Path) -> PlaybackS
         raise ValueError("Playback task terrain mode differs from the saved configuration")
     # 与训练保持相同的可信文件约定；只把所需策略装配到目标设备。
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_proof_teacher_v3":
+    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_proof_teacher_v2":
         raise ValueError("Incompatible SuperMimic checkpoint format")
     task_metadata = checkpoint.get("go2_task")
     if (not isinstance(task_metadata, dict) or not isinstance(task_metadata.get("curriculum"), dict)
@@ -109,7 +109,7 @@ def build_playback_policy(source: PlaybackSource, adapter) -> torch.nn.Module:
 
 def checkpoint_actor(checkpoint: dict):
     """只从检查点装配actor；部署不分任务策略之外的世界模型与critic。"""
-    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_proof_teacher_v3":
+    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_proof_teacher_v2":
         raise ValueError("Incompatible SuperMimic velocity-policy checkpoint format")
     if not isinstance(checkpoint.get("config"), dict) or not isinstance(checkpoint.get("spec"), dict):
         raise ValueError("Checkpoint is missing the algorithm configuration or task specification")
@@ -137,7 +137,7 @@ def export_checkpoint(checkpoint_path: str | Path, directory: str | Path, *, ite
     if not path.is_file():
         raise FileNotFoundError(f"Checkpoint file not found: {path}")
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_proof_teacher_v3":
+    if not isinstance(checkpoint, dict) or checkpoint.get("format") != "supermimic_proof_teacher_v2":
         raise ValueError(f"Not a SuperMimic checkpoint: {path}")
     execution = checkpoint["execution"]
     if not isinstance(execution, dict):

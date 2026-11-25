@@ -254,8 +254,8 @@ class SuperMimicRunner:
     def _advance_collection(self, state, history, action, result):
         """编译统计与历史推进，env.step与回放环的主机游标留在调用方。"""
         self.actor.update_statistics(history)
-        self.model.update_stats(state, action, result.final_state)
         done = result.terminated | result.truncated
+        self.model.update_stats(state, action, result.final_state, mask=~done)
         self.episode_returns.add_(result.reward)
         self.episode_lengths.add_(1)
         self.completed_episodes.append(self.episode_returns, self.episode_lengths, done)
@@ -328,13 +328,13 @@ class SuperMimicRunner:
         window_started = None
         previous_window = None
         target = max(self.target_iteration, self.iteration + iterations)
-        # 独立终态使H步窗口只需H条转移；预填不消耗训练累加器。
-        if not self.replay.ready(self.config.wm_window):
+        # 预填使用整数批次且不消耗训练累加器；默认8步窗口仍先采10步。
+        if self.replay.size <= self.config.wm_window + 1:
             prefill_started = time.perf_counter()
             prefill_previous_steps = self.real_steps
             prefill_falls = torch.zeros((), device=self.device)
             prefill_reset_steps = torch.zeros((), dtype=torch.long, device=self.device)
-            while not self.replay.ready(self.config.wm_window):
+            while self.replay.size <= self.config.wm_window + 1:
                 metrics = self.collect(int(self.config.collect_steps))
                 prefill_falls += metrics["failures"]
                 prefill_reset_steps += metrics["reset_steps"]

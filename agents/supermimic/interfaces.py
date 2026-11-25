@@ -29,7 +29,7 @@ class AlgorithmSpec:
     semantic_id: str
     heightmap_dim: int
     history_length: int = 10
-    model_id: str = "supermimic_proof_teacher_v3"
+    model_id: str = "supermimic_proof_teacher_v2"
 
     @property
     def hash(self) -> str:

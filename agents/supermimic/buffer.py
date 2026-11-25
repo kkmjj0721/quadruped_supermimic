@@ -23,7 +23,7 @@ class Seed:
 
 @dataclass
 class Window:
-    """批次优先；目标为动作后的真实终态，有效步包含首次结束当步。"""
+    """批次优先；目标取下一slot，终止当步的reset后状态仅供参考稀有事件判定。"""
 
     initial: TaskState
     actions: Tensor
@@ -62,7 +62,6 @@ class Replay:
             self.size_device = torch.zeros((), dtype=torch.long, device=device)
             self.clock_device = torch.zeros_like(self.size_device)
         self.states = self._state_storage((num_envs, capacity))
-        self.final_states = self._state_storage((num_envs, capacity))
         self.actions = torch.zeros(num_envs, capacity, spec.action_dim, device=device)
         if history_storage == "full":
             self.histories = torch.zeros(num_envs, capacity, spec.history_length, spec.observation_dim,
@@ -94,7 +93,6 @@ class Replay:
     def add(self, state: TaskState, history: Tensor, action: Tensor, result):
         slot = self.clock % self.capacity
         self.states.data[:, slot].copy_(state.data)
-        self.final_states.data[:, slot].copy_(result.final_state.data)
         self.actions[:, slot].copy_(action)
         self.done[:, slot].copy_(result.terminated | result.truncated)
         self.terminated[:, slot].copy_(result.terminated)
@@ -116,7 +114,7 @@ class Replay:
             self.size_device.add_(1).clamp_max_(self.capacity)
 
     def ready(self, horizon: int) -> bool:
-        return self.size >= horizon
+        return self.size > horizon + 1
 
     def _sample_positions(self, batch, horizon, device_indices):
         rows = torch.randint(self.num_envs, (batch,), device=self.device)
@@ -154,16 +152,15 @@ class Replay:
 
     def sample_window_indices(self, batch: int, horizon: int, *, device_indices=False):
         """仅消费窗口采样随机数，延后决定是否读取回放数据。"""
-        return self._sample_indices(batch, horizon - 1, device_indices=device_indices)
+        return self._sample_indices(batch, horizon, device_indices=device_indices)
 
     def gather_windows(self, rows: Tensor, starts: Tensor, horizon: int) -> Window:
         """按既定环境与时间索引读取窗口，不再消费随机数。"""
         slots = (starts[:, None] + torch.arange(horizon, device=self.device)) % self.capacity
         done = self.done[rows[:, None], slots]
-        # 结束动作仍有真实物理终态，只屏蔽其后的新回合转移。
-        valid = torch.cat((torch.ones_like(done[:, :1]), ~done[:, :-1]), dim=1).cumprod(dim=1).bool()
+        valid = (~done).cumprod(dim=1).bool()
         return Window(self.states.index((rows, starts)), self.actions[rows[:, None], slots],
-                      self.final_states.index((rows[:, None], slots)), valid,
+                      self.states.index((rows[:, None], (slots + 1) % self.capacity)), valid,
                       self.terminated[rows[:, None], slots])
 
 

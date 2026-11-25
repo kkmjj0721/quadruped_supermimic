@@ -65,7 +65,7 @@ class Go2ReferenceCfg(BaseConfig):
         collect_det_frac: float = 0.25  # 各地形按比例分配无额外动作探索噪声的环境。
 
         # ---------- 编译与回滚 ----------
-        compile_imagination: bool = True  # 编译四步想象、采集张量、完整lambda-return与critic损失。
+        compile_imagination: bool = True  # 编译想象单步、采集张量、完整lambda-return与critic损失。
         compile_backend: str = "inductor"
         collapse_falls: float = 3.0
         collapse_interval: int = 50
@@ -143,7 +143,7 @@ class Go2ReferenceCfg(BaseConfig):
         metric_interval = 10  # 设备端汇总展示指标，每10轮回读并写TensorBoard。
         imag_microbatch = 4096
         critic_microbatch = 32768
-        wm_compile = True  # 编译完整八步监督及损失。
+        wm_compile = True  # 编译可复用单步监督核，八步自回归留在外层。
         fused_adam = True
         cuda_graph = True  # CUDA默认捕获模型、actor和critic更新；CPU使用原执行方式。
         detailed_timing = False  # 可显式开启图外采样／更新细分，原有阶段计时继续保留。

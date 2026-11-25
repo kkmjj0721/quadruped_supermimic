@@ -92,7 +92,7 @@ class Learner:
         if kind == "muon_adam":
             return MuonAdam(module, [module] if name == "actor" else [module.net], cfg.learning_rate,
                             betas=betas, fused=fused, capturable=capturable, io=name == "actor",
-                            weight_decay=cfg.muon_weight_decay, compile_backend=cfg.compile_backend)
+                            weight_decay=cfg.muon_weight_decay)
         parameters = list(module.policy_parameters() if name == "actor" else module.parameters())
         rate = torch.tensor(cfg.learning_rate, device=parameters[0].device) if capturable else cfg.learning_rate
         return torch.optim.Adam(parameters, lr=rate, betas=betas, fused=fused, capturable=capturable)
@@ -126,19 +126,16 @@ class Learner:
         return {"wm_loss": loss.detach(), "wm_grad_norm": gradient.detach(),
                 "wm_valid_steps": window.valid.sum()}
 
-    def _critic_loss(self, normalized_features, targets, weights, weight_mean):
-        error = self.critic.net(normalized_features).squeeze(-1) - targets
-        return (error.square() * weights).mean() / weight_mean
+    def _critic_loss(self, normalized_features, targets):
+        return (self.critic.net(normalized_features).squeeze(-1) - targets).square().mean()
 
-    def _fit_critic(self, features, targets, weights, *, timing=None):
-        """按累计存活权重拟合固定目标，保留尾批与分批累积语义。"""
+    def _fit_critic(self, features, targets, *, timing=None):
+        """以固定想象目标拟合价值网络，保留尾批与分批累积语义。"""
         cfg = self.config
         critic, optimizer = self.critic, self.critic_optimizer
         with timing.section("critic_prepare") if timing is not None else nullcontext():
-            critic.normalizer.update(features, mask=weights > 0)
+            critic.normalizer.update(features)
             normalized_features = critic.normalizer(features)
-            # 每个种子的首步权重为1；全批分母为正，零权重小批无需另设分支。
-            weight_mean = weights.mean()
             losses = []
             minibatch = features.shape[0] // cfg.critic_minibatches
         with timing.section("critic_update") if timing is not None else nullcontext():
@@ -150,8 +147,7 @@ class Learner:
                     optimizer.zero_grad(set_to_none=True)
                     value_loss = features.new_zeros(())
                     for part in selected.split(self.execution.critic_microbatch):
-                        partial_loss = self.critic_loss_kernel(
-                            normalized_features[part], targets[part], weights[part], weight_mean)
+                        partial_loss = self.critic_loss_kernel(normalized_features[part], targets[part])
                         weighted_loss = partial_loss * (part.numel() / selected.numel())
                         weighted_loss.backward()
                         value_loss += weighted_loss.detach()
@@ -166,7 +162,7 @@ class Learner:
         batch = seed.history.shape[0]
         with timing.section("actor_update") if timing is not None else nullcontext():
             self.actor_optimizer.zero_grad(set_to_none=True)
-            feature_batches, target_batches, weight_batches = [], [], []
+            feature_batches, target_batches = [], []
             metrics = {}
             velocity_mse_axes = seed.history.new_zeros(3)
             with frozen(self.model, self.critic):
@@ -185,7 +181,6 @@ class Learner:
                     (loss * weight).backward()
                     feature_batches.append(data.features[:, :-1].flatten(0, 1).detach())
                     target_batches.append(targets.flatten().detach())
-                    weight_batches.append(data.survivals[:, :-1].flatten().detach())
                     velocity_mse_axes += velocity_error.detach().mean(0) * weight
                     values = {"control_loss": control_loss.detach(), "velocity_loss": velocity_loss.detach(),
                               "actor_loss": loss.detach(),
@@ -206,14 +201,11 @@ class Learner:
                     self.actor_updates.add_(1)
             features = torch.cat(feature_batches)
             targets = torch.cat(target_batches)
-            weights = torch.cat(weight_batches)
-            del feature_batches, target_batches, weight_batches
-        value_loss, updates, minibatch = (self._fit_critic(features, targets, weights) if timing is None else
-                                         self._fit_critic(features, targets, weights, timing=timing))
+            del feature_batches, target_batches
+        value_loss, updates, minibatch = (self._fit_critic(features, targets) if timing is None else
+                                         self._fit_critic(features, targets, timing=timing))
         self.critic_updates.add_(updates)
         metrics.update({"control_grad_norm": gradient.detach(), "critic_loss": value_loss,
-                        "critic/survival_weight_mean": weights.mean(),
-                        "critic/zero_survival_fraction": (weights == 0).float().mean(),
                         "control_learning_rate": self.actor_optimizer.param_groups[0]["lr"],
                         "execution/imag_batch": batch,
                         "execution/imag_microbatch": min(batch, self.execution.imag_microbatch),

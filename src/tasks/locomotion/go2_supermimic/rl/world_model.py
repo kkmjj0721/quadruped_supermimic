@@ -42,7 +42,7 @@ class Go2WorldModel(WorldModel):
         return torch.cat((core, scale[GENERALIZED_DELTA_DIM:]), -1)
 
     def supervised_loss(self, current, predicted, target, recorded_current, delta, scale):
-        """保留原97维物理MSE，六项接触事件以未加类别权重的BCE监督。"""
+        """物理量保留原97维MSE，新增五项真实事件以未加类别权重的BCE监督。"""
         error = self.task.model_error(current, predicted, target, recorded_current)[:, :MODEL_EVENTS.start]
         regression = (error / scale[:MODEL_EVENTS.start]).square().mean(-1)
         events = F.binary_cross_entropy_with_logits(

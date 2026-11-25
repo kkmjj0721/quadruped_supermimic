@@ -70,7 +70,7 @@ class RunningNorm(nn.Module):
 
 
 class WorldModel(nn.Module):
-    """任务决定物理残差及事件输出，奖励与失败评分由任务计算。"""
+    """任务决定残差坐标；网络只学习记录物理转移，不学习奖励或失败头。"""
 
     def __init__(self, task, hidden):
         super().__init__()
@@ -85,11 +85,11 @@ class WorldModel(nn.Module):
         self.input_norm = RunningNorm(task.model_input_dim)
         self.output_norm = RunningNorm(task.spec.delta_dim)
         self.use_bf16 = False
-        self._compiled_supervised = None
+        self._supervised_step_kernel = self._supervised_step
 
     def configure_supervised_compile(self, *, enabled: bool, backend: str):
-        """整体编译自回归监督与损失；执行设置不进入模型参数或检查点。"""
-        self._compiled_supervised = compile_kernel(self._loss, backend) if enabled else None
+        """只编译可复用的单步预测与监督，外层保留自回归和随机数顺序。"""
+        self._supervised_step_kernel = compile_kernel(self._supervised_step, backend) if enabled else self._supervised_step
 
     @torch.no_grad()
     def update_stats(self, state: TaskState, action: Tensor, target: TaskState, mask: Tensor | None = None):
@@ -114,11 +114,11 @@ class WorldModel(nn.Module):
             network_delta = self.net(normalized)
         delta = self.output_norm.unnormalize(network_delta)
         physical = self.task.integrate(state, action, delta)
-        # 监督推进仍消费命令采样随机数；完整损失编译不得删除这些副作用。
+        # 监督推进仍消费命令采样随机数；单步编译返回完整状态以保留这些副作用。
         return self.task.advance(state, action, physical), delta
 
     def loss(self, window) -> Tensor:
-        return self._loss(window) if self._compiled_supervised is None else self._compiled_supervised(window)
+        return self._loss(window)
 
     def loss_scale(self) -> Tensor:
         """默认沿用输出统计；残差模型可独立定义物理状态误差尺度。"""
@@ -130,6 +130,12 @@ class WorldModel(nn.Module):
         error = self.task.model_error(current, predicted, target, recorded_current) / scale
         return error.square().mean(-1)
 
+    def _supervised_step(self, current, action, target, recorded_current, scale):
+        """返回完整推进状态和逐样本损失，使区域编译保留advance的随机数消费。"""
+        predicted, delta = self.predict(current, action, recorded_current)
+        loss = self.supervised_loss(current, predicted, target, recorded_current, delta, scale)
+        return predicted, loss
+
     def _loss(self, window) -> Tensor:
         current = window.initial
         recorded_current = window.initial
@@ -138,8 +144,7 @@ class WorldModel(nn.Module):
         for step in range(window.actions.shape[1]):
             target = window.targets.index((slice(None), step))
             action = window.actions[:, step]
-            predicted, delta = self.predict(current, action, recorded_current)
-            loss = self.supervised_loss(current, predicted, target, recorded_current, delta, scale)
+            predicted, loss = self._supervised_step_kernel(current, action, target, recorded_current, scale)
             total = total + (loss * window.valid[:, step]).sum()
             # 本协议的记忆只含记录动作与外生计时，按日志恢复命令重采样；物理状态始终回喂预测。
             current = TaskState(predicted.physical, target.memory, target.command, target.context)

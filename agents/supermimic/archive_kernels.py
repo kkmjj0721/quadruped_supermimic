@@ -76,7 +76,7 @@ def _sample_archive_or_replay(initial, actions, targets, valid, terminated,
         action_slots = (start + columns // ACTION) % CAPACITY
         action_values = tl.load(replay_actions + (environment * CAPACITY + action_slots) * ACTION + columns % ACTION,
                                 action_mask, other=0)
-        target_slots = (start + columns // STATE) % CAPACITY
+        target_slots = (start + columns // STATE + 1) % CAPACITY
         target_values = tl.load(replay_targets + (environment * CAPACITY + target_slots) * STATE + columns % STATE,
                                 target_mask, other=0)
         steps = tl.arange(0, TIME_BLOCK)
@@ -84,8 +84,8 @@ def _sample_archive_or_replay(initial, actions, targets, valid, terminated,
         step_slots = (start + steps) % CAPACITY
         ended = tl.load(replay_done + environment * CAPACITY + step_slots, replay_step_mask, other=0)
         replay_termination_values = tl.load(replay_terminated + environment * CAPACITY + step_slots, replay_step_mask, other=0)
-        # 首次结束当步仍有效，只屏蔽其后跨入新回合的转移。
-        replay_valid_values = tl.cumsum(ended.to(tl.int32)) - ended.to(tl.int32) == 0
+        # 结束当步的下一决策态已重置，不进入有效物理监督。
+        replay_valid_values = tl.cumsum(ended.to(tl.int32)) == 0
         tl.store(valid + row * STEPS + steps, replay_valid_values, replay_step_mask)
         tl.store(terminated + row * STEPS + steps, replay_termination_values, replay_step_mask)
     tl.store(initial + row * STATE + columns, initial_values, initial_mask)
@@ -107,7 +107,7 @@ def sample_archive_or_replay(archive, replay, rows, starts, indices, horizon, po
     _sample_archive_or_replay[(batch,)](
         initial, actions, targets, valid, terminated,
         archive.initial.data, archive.actions, archive.targets.data, archive.valid, archive.terminated,
-        replay.states.data, replay.actions, replay.final_states.data, replay.done, replay.terminated,
+        replay.states.data, replay.actions, replay.states.data, replay.done, replay.terminated,
         rows, starts, indices, populated, state_width, action_width, horizon, replay.capacity,
         block, triton.next_power_of_2(horizon))
     return Window(TaskState.from_flat(initial, archive.initial.widths), actions,
