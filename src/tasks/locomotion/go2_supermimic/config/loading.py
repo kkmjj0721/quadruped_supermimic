@@ -59,9 +59,12 @@ def load_task_config(path: Path):
 def configuration_for_settings(settings: dict):
     """配置I/O边界只接受当前PROOF教师，不迁移旧MoE快照。"""
     from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
+    from src.config.go2.go2_parkour_config import parkour_config
 
     if "algorithm" in settings and settings["algorithm"] != "proof_teacher":
         raise ValueError(f"Unsupported SuperMimic algorithm: {settings['algorithm']}")
+    if "terrain" in settings and "mode" in settings["terrain"] and settings["terrain"]["mode"] == "parkour":
+        return parkour_config(Go2ReferenceCfg())
     return Go2ReferenceCfg()
 
 
@@ -71,8 +74,15 @@ def validate_config(cfg) -> None:
         raise ValueError("SuperMimic requires the proof_teacher algorithm")
     if not cfg.commands.heading_command or cfg.commands.rel_heading_envs != 1.0 or cfg.commands.stages:
         raise ValueError("The Go2 teacher requires heading commands and the existing fixed velocity ranges")
-    if cfg.terrain.mode not in ("flat", "rough"):
+    if cfg.terrain.mode not in ("flat", "rough", "parkour"):
         raise ValueError("Unsupported SuperMimic terrain mode")
+    if cfg.terrain.mode == "parkour":
+        if not cfg.terrain.asset_path or not (Path(__file__).resolve().parents[5] / cfg.terrain.asset_path).is_file():
+            raise ValueError(f"Parkour terrain asset does not exist: {cfg.terrain.asset_path}")
+        if not cfg.commands.parkour:
+            raise ValueError("Parkour requires the second-stage command configuration")
+        if cfg.domain_randomization.joint_parameter_mode not in ("startup", "reset"):
+            raise ValueError("Parkour joint randomization mode must be startup or reset")
 
 
 def algorithm_config(cfg):

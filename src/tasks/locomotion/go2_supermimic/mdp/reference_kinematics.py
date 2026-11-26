@@ -64,8 +64,8 @@ class Go2Kinematics(nn.Module):
             feet = mm3(offset, axis_angle_to_mat(axes[:, level], angles[..., level]))
         return torch.atan2(feet[..., 1, 0], feet[..., 0, 0])
 
-    def forward(self, p, R, v, w, q, qd):
-        """返回世界系髋4／膝4／足4位置和足4线速度，保留任意前置批次维度。
+    def _calf_state(self, p, R, v, w, q, qd):
+        """四腿并行恢复髋、膝和 calf 刚体的位置、姿态及速度，保留前置批次维度。
 
         p/R/v/w 是根部世界位置、旋转、线速度与角速度；q/qd 为 JOINT_NAMES
         顺序的真实关节角和速度。几何 buffer 与输入应在同一设备和精度。
@@ -88,7 +88,20 @@ class Go2Kinematics(nn.Module):
             angular = omega
             if level > 0:
                 limbs.append(position)
+        return limbs, position, rotation, velocity, angular
+
+    def forward(self, p, R, v, w, q, qd):
+        """四腿并行恢复髋、膝、足位置与足速。"""
+        limbs, position, rotation, velocity, angular = self._calf_state(p, R, v, w, q, qd)
         displacement = mv3(rotation, self.site_offsets)
         feet = position + displacement
         foot_velocities = velocity + torch.cross(angular, displacement, dim=-1)
         return torch.cat((*limbs, feet), dim=-2), foot_velocities
+
+    def foot_volume_points(self, p, R, v, w, q, qd, volume_offsets):
+        """每足四点在 calf 系相对 site 偏移，刚体运输得到世界位置与速度。"""
+        _, position, rotation, velocity, angular = self._calf_state(p, R, v, w, q, qd)
+        displacement = mv3(rotation.unsqueeze(-3), self.site_offsets[:, None] + volume_offsets)
+        points = position.unsqueeze(-2) + displacement
+        velocities = velocity.unsqueeze(-2) + torch.cross(angular.unsqueeze(-2), displacement, dim=-1)
+        return points.flatten(-3, -2), velocities.flatten(-3, -2)

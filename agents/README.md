@@ -41,7 +41,23 @@ uv run --no-sync python scripts/play.py Unitree-Go2-SuperMimic-Rough \
 
 `--task-config`加载当前教师配置；`--resume`默认热启动，`--continue-run True`接续迭代号。检查点与同目录`task_config.json`共同描述任务；加载不再比较配置全量快照或任务哈希，权重仍严格加载。旧快照中的`control.velocity_limit`和`terrain.curriculum_iterations`已删除，加载前须移除这两个无效字段。当前格式为`supermimic_proof_teacher_v2`，状态151维，旧v1教师与MoE检查点均不兼容；不提供字段或权重兼容迁移。本轮事件与站姿版本需重新训练。
 
-任务名称沿用`Unitree-Go2-SuperMimic-Flat/Rough`。当前Go2资产、关节顺序、PD、动作尺度、物理随机化、命令采样和地形课程沿用本项目；因此不声称与作者IsaacLab／PhysX轨迹等价。
+任务名称包含`Unitree-Go2-SuperMimic-Flat/Rough/Parkour`。当前Go2资产、关节顺序、PD、动作尺度、物理随机化、命令采样和地形课程沿用本项目；因此不声称与作者IsaacLab／PhysX轨迹等价。
+
+## 二阶段 Parkour
+
+从普通粗糙地形权重热启动二阶段；Actor、Critic 和世界模型形状保持不变，任务上下文追加可回放的地形族号。默认使用预打包 `src/assets/terrains/proof_parkour_17.npz`，无 IsaacLab 运行依赖。
+
+```bash
+.venv/bin/python tools/build_proof_parkour_terrain.py --seed 17
+.venv/bin/python scripts/train.py Unitree-Go2-SuperMimic-Parkour \
+  --resume '<Rough实验目录>/model_10000.pt' --num-envs 4096 --max-iterations 10000
+.venv/bin/python scripts/play.py Unitree-Go2-SuperMimic-Parkour \
+  --checkpoint-file '<Parkour实验目录>/model_10000.pt' --num-envs 20
+```
+
+跨阶段 `--resume` 完整切换为官方 23 项二阶段奖励、按族命令、重置及随机化配置，继承来源算法和站姿；禁止跨阶段 `--continue-run True`，二阶段自身可续训。显式 `--task-config` 必须声明 `terrain.mode="parkour"`。`gap/climb/hurdle/stairs_inv_high_straight` 始终保留高程，其余七族以 40% 概率遮蔽；播放统一使用完整高程。日志位于实验目录下的 `parkour/`，按族记录课程等级。质量倍率采用 MjLab 原生对数均匀分布，MuJoCo 接触及质量／惯量映射差异见任务来源说明。
+
+离线构建器支持 `--seed 42 --num-rows 4 --num-cols 6 --output <资产路径>`；训练配置 `terrain.asset_path` 指向新资产后（相对路径以项目根目录为基准，也可指定绝对路径），运行时按资产元数据装配布局。十一族参数与几何实现在 `tools/parkour_terrain/`。
 
 ## 策略导出
 

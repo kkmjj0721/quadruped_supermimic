@@ -18,8 +18,9 @@ from .mjlab_step import step_manual_reset
 from ..config.env_cfgs import resolve_go2_supermimic_cfg
 from ..go_supermimic_env_cfg import make_go2_supermimic_env_cfg
 from ..mdp.curriculums import CommandCurriculum, TerrainCurriculum
+from ..mdp.parkour import PARKOUR_FAMILIES, SPECIAL_FAMILIES
 from ..mdp.state_spec import (
-    CONTEXT_DIM, CONTEXT_ENCODER_BIAS, CONTEXT_FRICTION,
+    CONTEXT_ENCODER_BIAS, CONTEXT_FRICTION, CONTEXT_TERRAIN_FAMILY,
     CONTEXT_EXTEROCEPTIVE_MASK, CONTEXT_ORIGIN, CONTEXT_RANGES, CONTEXT_ZERO_PROBABILITY,
     COMMAND_OVERRIDE,
 )
@@ -76,8 +77,19 @@ class Go2TransitionAdapter:
                 episode_length_s=self.cfg.env.episode_length_s, device=self.device)
             if not self.map.plane:
                 self.terrain_curriculum.family_ids.copy_(terrain.terrain_types)
-            # 源mask名单没有flat；其余保留地形分别对应discrete、stairs、slope。
-            self.mask_eligible = torch.tensor([name != "flat" for name in self.map.family_names], device=self.device)
+            if self.cfg.terrain.mode == "parkour":
+                self.column_family_ids = torch.tensor(
+                    [PARKOUR_FAMILIES.index(name) for name in self.map.family_names], device=self.device)
+                eligible = [name not in SPECIAL_FAMILIES for name in self.map.family_names]
+                env_families = [self.map.family_names[index] for index in self.terrain_curriculum.family_ids.cpu().tolist()]
+                self.terrain_family_rows = {
+                    name: torch.tensor([index for index, family in enumerate(env_families) if family == name], device=self.device)
+                    for name in dict.fromkeys(env_families)
+                }
+            else:
+                eligible = [name != "flat" for name in self.map.family_names]
+                self.terrain_family_rows = {}
+            self.mask_eligible = torch.tensor(eligible, device=self.device)
             self.terrain_half_size = torch.tensor(
                 (self.map.rows * self.map.size[0] / 2 + 4., self.map.cols * self.map.size[1] / 2 + 4.), device=self.device)
             self.context_version = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
@@ -132,7 +144,7 @@ class Go2TransitionAdapter:
         terrain.terrain_types[ids] = self.terrain_curriculum.family_ids[ids] + self.map.rings
 
     def _context(self, ids):
-        context = torch.zeros((ids.numel(), CONTEXT_DIM), dtype=torch.float32, device=self.device)
+        context = torch.zeros((ids.numel(), self.task.spec.context_dim), dtype=torch.float32, device=self.device)
         foot = self.foot_geom_id
         friction = self.raw_env.sim.model.geom_friction
         context[:, CONTEXT_FRICTION] = (friction[ids, foot, 0] if friction.ndim == 3 else friction[foot, 0])
@@ -148,6 +160,8 @@ class Go2TransitionAdapter:
         eligible = self.mask_eligible[self.terrain_curriculum.family_ids[ids]]
         enabled = torch.rand(ids.numel(), device=self.device) >= self.cfg.teacher.exteroceptive_dropout
         context[:, CONTEXT_EXTEROCEPTIVE_MASK] = (enabled | ~eligible).float()
+        if self.cfg.terrain.mode == "parkour":
+            context[:, CONTEXT_TERRAIN_FAMILY] = self.column_family_ids[self.terrain_curriculum.family_ids[ids]]
         return context
 
     def _reset_rows(self, ids):
@@ -237,6 +251,8 @@ class Go2TransitionAdapter:
         self.last_metrics.update(episode_metrics)
         self.last_metrics.update(terrain_level=self.terrain_curriculum.levels.float().mean(),
                                  command_stage_iteration=float(self.command_curriculum.iteration))
+        self.last_metrics.update({f"terrain_level/{name}": self.terrain_curriculum.levels[rows].float().mean()
+                                  for name, rows in self.terrain_family_rows.items()})
         return EnvStep(final, self._state, reward, terminated, truncated, versions)
 
     # ---------- 课程持久化与资源释放 ----------

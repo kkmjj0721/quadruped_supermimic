@@ -11,6 +11,7 @@ from agents.supermimic.compilation import compile_kernel
 from agents.supermimic.interfaces import AlgorithmSpec, TaskState
 
 from .reference_rewards import reference_reward_terms
+from .parkour import EDGE_FAMILIES, PARKOUR_FAMILIES, SPECIAL_FAMILIES
 from .commands import advance_commands, heading_command, sample_commands
 from .reference_kinematics import Go2Kinematics
 from .reference_rotations import mat_to_quat, mv3, quat_to_mat
@@ -25,7 +26,7 @@ from .state_spec import (
     AIR_TIME, COMMAND_OVERRIDE, COMMAND_TIMER, CONTACT, CONTACT_TIME, CONTEXT_DIM,
     CONTEXT_ENCODER_BIAS, CONTEXT_EXTEROCEPTIVE_MASK, ELAPSED_TIME, FIRST_CONTACT,
     FOOT_NAMES, FORWARD, HEADING_TARGET, LAST_AIR_TIME, LAST_CONTACT_TIME,
-    MEMORY_DIM, PREVIOUS_ACTION, PREVIOUS_PREVIOUS_ACTION, STANDING,
+    MEMORY_DIM, PARKOUR_CONTEXT_DIM, PREVIOUS_ACTION, PREVIOUS_PREVIOUS_ACTION, STANDING,
 )
 
 
@@ -35,6 +36,7 @@ class Go2ReferenceTaskModel:
     observation_term_dims = (3, 3, 3, 12, 12, 12)
 
     def __init__(self, cfg, default_joint_pos: Tensor, joint_limits: Tensor, surface, device="cpu"):
+        self.parkour = cfg.terrain.mode == "parkour"
         self.cfg = deepcopy(cfg)
         self.device = torch.device(device)
         self.surface = surface
@@ -47,6 +49,12 @@ class Go2ReferenceTaskModel:
         self.reward_scales = cfg.to_dict()["reward"]["scales"]
         self.dynamics = ResidualDynamics(self.dt, cfg.control.decimation)
         self.kinematics = Go2Kinematics(device=self.device)
+        if self.parkour:
+            self.special_family = torch.tensor([name in SPECIAL_FAMILIES for name in PARKOUR_FAMILIES], device=self.device)
+            self.edge_family = torch.tensor([name in EDGE_FAMILIES for name in PARKOUR_FAMILIES], device=self.device)
+            axis = self.default_joint_pos.new_tensor((-.01, .01))
+            yz = torch.stack(torch.meshgrid(axis, axis, indexing="ij"), -1).reshape(4, 2)
+            self.volume_offsets = torch.cat((torch.zeros_like(yz[:, :1]), yz), -1)
         self._read_physical_kernel = self._read_physical_tensors
         # PROOF ae910b8：18×9，yaw对齐，中心前移0.6米。
         size_x, size_y = cfg.terrain.scan_size_m
@@ -68,10 +76,11 @@ class Go2ReferenceTaskModel:
             + (noise.joint_pos,) * 12 + (noise.joint_vel,) * 12 + (0.,) * 12) * cfg.noise.noise_level
         self.spec = AlgorithmSpec(
             state_dim=PHYSICAL_DIM + 4, delta_dim=PHYSICAL_DIM - 45, action_dim=12,
-            observation_dim=45, privileged_dim=cfg.env.num_critic_obs, context_dim=CONTEXT_DIM,
+            observation_dim=45, privileged_dim=cfg.env.num_critic_obs, context_dim=PARKOUR_CONTEXT_DIM if self.parkour else CONTEXT_DIM,
             memory_dim=MEMORY_DIM, command_dim=3, heightmap_dim=self.heightmap_dim,
             history_length=cfg.env.num_obs_history,
-            semantic_id="go2_proof_teacher_ae910b8_contact_events_residual_fk_v3",
+            semantic_id=("go2_proof_parkour_ae910b8_contact_events_residual_fk_v1" if self.parkour else
+                         "go2_proof_teacher_ae910b8_contact_events_residual_fk_v3"),
             model_id="supermimic_proof_teacher_v2")
 
     # ---------- 真实物理状态 ----------
@@ -93,10 +102,9 @@ class Go2ReferenceTaskModel:
             [[names.index(f"{leg}_calf_collision{index}") for index in (1, 2)] for leg in FOOT_NAMES],
             device=self.device)
         self.actuator_ids = robot.indexing.ctrl_ids
-        model = env.sim.mj_model
-        ids = self.actuator_ids.cpu().numpy()
-        self.actuator_gain = torch.tensor(model.actuator_gainprm[ids, 0].copy(), dtype=torch.float32, device=self.device)
-        self.actuator_bias = torch.tensor(model.actuator_biasprm[ids, :3].copy(), dtype=torch.float32, device=self.device)
+        gain, bias = env.sim.model.actuator_gainprm, env.sim.model.actuator_biasprm
+        self.actuator_gain = gain[:, self.actuator_ids, 0] if gain.ndim == 3 else gain[self.actuator_ids, 0]
+        self.actuator_bias = bias[:, self.actuator_ids, :3] if bias.ndim == 3 else bias[self.actuator_ids, :3]
 
     def configure_collection_compile(self, *, enabled, backend):
         """只编译纯张量快照核，MjLab惰性属性和步号在eager边界解析。"""
@@ -133,8 +141,8 @@ class Go2ReferenceTaskModel:
         calf_force = calf_net.norm(dim=-1).amax(dim=2)
         base_force = base_history.norm(dim=-1).amax(dim=(1, 2))[:, None]
         computed_torque = (self.actuator_gain * control[:, self.actuator_ids]
-                           + self.actuator_bias[:, 0] + self.actuator_bias[:, 1] * actuator_length[:, self.actuator_ids]
-                           + self.actuator_bias[:, 2] * actuator_velocity[:, self.actuator_ids])
+                           + self.actuator_bias[..., 0] + self.actuator_bias[..., 1] * actuator_length[:, self.actuator_ids]
+                           + self.actuator_bias[..., 2] * actuator_velocity[:, self.actuator_ids])
         history_contact = (foot_history.norm(dim=-1).amax(dim=2) > self.cfg.reward.contact_force_threshold).float()
         # 真实传感器返回地面受力，转为机器人受力；事件仍在此物理边界生成。
         foot_force = -foot_force
@@ -244,7 +252,7 @@ class Go2ReferenceTaskModel:
         memory = physical.new_zeros((physical.shape[0], MEMORY_DIM))
         memory[:, COMMAND_TIMER], memory[:, HEADING_TARGET] = timer, heading
         memory[:, STANDING], memory[:, FORWARD] = standing, forward
-        command = heading_command(self.cfg.commands, command, physical[:, 72], heading, standing)
+        command = heading_command(self.cfg.commands, command, physical[:, 72], heading, standing, forward, context)
         return TaskState(physical, memory, command, context)
 
     def feet_height(self, physical: Tensor) -> Tensor:

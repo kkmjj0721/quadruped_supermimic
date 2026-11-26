@@ -2,12 +2,13 @@
 """内容：从任务快照派生PROOF三输入教师的部署坐标、观测与控制语义。"""
 
 from ..mdp.state_spec import JOINT_NAMES
+from ..mdp.parkour import SPECIAL_FAMILIES
 
 
 def deployment_metadata(cfg, *, algorithm) -> dict:
     """从任务配置生成离线部署所需的观测、地图及动作定义。"""
     control = cfg.control
-    return {
+    metadata = {
         "algorithm": "supermimic_proof_teacher",
         "inference_action": "deterministic_mean",
         "observation_dim": 45, "history_length": cfg.env.num_obs_history,
@@ -43,3 +44,7 @@ def deployment_metadata(cfg, *, algorithm) -> dict:
                                 "supervision": "same_time_real_state_mse"},
         "reference_commit": "ae910b821d635f04226489df80bdd77d1d7b0b82",
     }
+    if cfg.terrain.mode == "parkour":
+        del metadata["exteroceptive_mask"]["flat_family_mask"]
+        metadata["exteroceptive_mask"]["always_visible_families"] = list(SPECIAL_FAMILIES)
+    return metadata

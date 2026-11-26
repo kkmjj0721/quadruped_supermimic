@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 from pathlib import Path
 
 import torch
@@ -14,7 +13,7 @@ from mjlab.managers.command_manager import NullCommandManager
 from mjlab.utils.wrappers import VideoRecorder
 
 from agents.supermimic.interfaces import append_history
-from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
+from ..config.env_cfgs import resolve_go2_supermimic_cfg
 
 from ..config.train_cfg import TASK_MODES
 from .checkpoints import build_playback_policy, load_playback_source
@@ -222,8 +221,7 @@ def make_playback(task_id, *, checkpoint_file=None, agent="trained", num_envs=No
     task_mode = TASK_MODES[task_id]
     dummy_action = {"trained": None, "zero": torch.zeros, "random": torch.rand}[agent]
     source = load_playback_source(task_id, checkpoint_file) if agent == "trained" else None
-    cfg = deepcopy(source.cfg) if source is not None else Go2ReferenceCfg()
-    cfg.terrain.mode = task_mode
+    cfg = resolve_go2_supermimic_cfg(source.cfg if source is not None else None, terrain_mode=task_mode)
     cfg.env.num_envs = num_envs if num_envs is not None else 1
     torch.manual_seed(cfg.env.seed)
     adapter = _PlaybackTransitionAdapter(

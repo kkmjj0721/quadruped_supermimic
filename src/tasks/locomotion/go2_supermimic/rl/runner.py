@@ -66,6 +66,8 @@ class Go2SuperMimicRunner(SuperMimicRunner):
         columns.update(("task/" + name, scalar) for name in (
             "terrain_level", "tracking_linear_mse", "tracking_angular_mse", "action_rms",
             "exteroceptive_fraction", "base_height", "fast_yaw"))
+        if self.task.cfg.terrain.mode == "parkour":
+            columns.update((f"task/terrain_level/{name}", scalar) for name in self.env.terrain_family_rows)
         return columns
 
     def _override_actions(self, action, history, observation):

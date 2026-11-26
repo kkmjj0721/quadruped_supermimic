@@ -21,6 +21,7 @@ from mjlab.utils.torch import configure_torch_backends
 
 from agents.supermimic.config import ExecutionConfig, RUNNER_RUNTIME_FIELDS
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
+from src.config.go2.go2_parkour_config import parkour_config
 from src.runtime import configure_cuda_libdevice
 
 from ..config.loading import load_task_config, algorithm_config
@@ -36,7 +37,14 @@ def _resolve_task_config(task_id: str, args: SuperMimicTrainConfig):
     if source is None and resume is not None:
         source = resume.parent / "task_config.json"
     cfg = load_task_config(source)[0] if source is not None else Go2ReferenceCfg()
-    cfg.terrain.mode = TASK_MODES[task_id]
+    mode = TASK_MODES[task_id]
+    if mode == "parkour" and cfg.terrain.mode != "parkour":
+        if args.task_config is not None:
+            raise ValueError("An explicit Parkour task configuration must declare terrain.mode='parkour'")
+        if resume is not None and args.continue_run:
+            raise ValueError("Rough-to-Parkour requires a hot start with continue_run=False")
+        cfg = parkour_config(cfg)
+    cfg.terrain.mode = mode
     for field, value in (("num_envs", args.num_envs), ("seed", args.seed)):
         if value is not None:
             setattr(cfg.env, field, value)
@@ -75,6 +83,8 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
     if torch.device(device).type == "cuda":
         configure_cuda_libdevice()
     log_root = (Path(args.log_root).expanduser() / args.experiment_name).resolve()
+    if cfg.terrain.mode == "parkour":
+        log_root = log_root / "parkour"
     name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
     if args.run_name:
         name += f"_{args.run_name}"

@@ -25,3 +25,9 @@ Go2资产、执行器PD、动作尺度、物理随机化、命令采样、行走
 ## 手动重置采集步适配
 
 `rl/mjlab_step.py` 根据 MjLab 1.6.0 的 `mjlab/envs/manager_based_rl_env.py::ManagerBasedRlEnv.step` 改写，仅调整由 adapter 完成手动重置时的 pending 索引处理；物理与 manager 顺序保留。来源：https://github.com/mujocolab/mjlab 。上游 Apache-2.0 许可副本见 `rl/LICENSE_mjlab`。此适配用于本任务的手动重置采集路径，未修改安装包。
+
+## 二阶段 Parkour 来源
+
+`mdp/parkour.py`、`parkour_terrains.py`、二阶段命令、课程和奖励，以及 `src/config/go2/go2_parkour_config.py` 对齐同一 `proof-loco@ae910b8` 的 Parkour 配方，实际启用 23 项；普通阶段的三个附加奖励在二阶段停用。离线几何、粗糙度和锐边源于 [LocoLab@37e567d](https://github.com/syw-robotics/LocoLab/tree/37e567d81ec0198a8984b5c5650cd4489d3a56d3)，纯几何原语源于 IsaacLab v2.3.0，代码和 BSD 许可位于 `tools/parkour_terrain/`。运行时仅读取打包资产，无 IsaacLab 依赖。
+
+质量／惯量及外力使用 MjLab 原生事件：肢体质量与惯量同比缩放，倍率在 [0.8,1.2] 对数均匀，区别于官方的均匀倍率；base 加减质量不同比缩放惯量；MuJoCo 无独立 restitution 参数，未构造对应项。模型输入仍为摩擦、质心和编码器偏置的 16 维仿真上下文，不新增质量、PD 或推搡输入。PD 力矩从实际每环境执行器参数恢复。上述为本项目适配差异，不代表与 PhysX 轨迹或训练效果等价。

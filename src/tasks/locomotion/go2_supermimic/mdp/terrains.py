@@ -70,21 +70,27 @@ def clean_look(terrain):
 
 
 class TerrainMap:
-    """十二种普通地形各占一列，六行按生成器difficulty递增。"""
+    """按普通地形生成器或预打包 Parkour 资产声明地图布局。"""
 
     def __init__(self, cfg):
         self.cfg = deepcopy(cfg)
         self.plane = cfg.mode == "flat"
-        self.size = tuple(cfg.patch_size_m)
-        self.generator = None if self.plane else reference_generator(cfg)
-        self.family_names = ("flat",) if self.plane else tuple(self.generator.sub_terrains)
+        if cfg.mode == "parkour":
+            from .parkour_terrains import parkour_generator
+
+            self.generator, self.family_names = parkour_generator(cfg)
+        else:
+            self.generator = None if self.plane else reference_generator(cfg)
+            self.family_names = ("flat",) if self.plane else tuple(self.generator.sub_terrains)
+        self.size = tuple(cfg.patch_size_m) if self.plane else tuple(self.generator.size)
         weights = (1.,) if self.plane else tuple(term.proportion for term in self.generator.sub_terrains.values())
         total_weight = sum(weights)
         self.proportions = tuple(weight / total_weight for weight in weights)
         self.rows, self.cols = (1, 1) if self.plane else (self.generator.num_rows, len(self.family_names))
         self.level_counts = (self.rows,) * self.cols
         self.row_offset = self.rings = 0
-        self.support_half_extent = np.asarray((self.rows, self.cols)) * self.size / 2 + cfg.outer_flat_width_m
+        border = cfg.outer_flat_width_m if self.plane else self.generator.border_width
+        self.support_half_extent = np.asarray((self.rows, self.cols)) * self.size / 2 + border
         self.origins = None
 
     def entity_cfg(self):
@@ -283,6 +289,10 @@ class TerrainSurface:
 
     @classmethod
     def from_model(cls, model, device="cpu", terrain_map=None):
+        if terrain_map.cfg.mode == "parkour":
+            from .parkour_terrains import ParkourSurface
+
+            return ParkourSurface.from_model(model, device=device, terrain_map=terrain_map)
         if terrain_map.plane:
             return PlaneSurface(device)
         self = cls()

@@ -1,6 +1,8 @@
 # Copyright (c) 2026-2027 zh
 """内容：复用PROOF普通地形奖励与main的机身倾斜、站立关节速度、足端滑移项，返回奖励率。"""
 
+import math
+
 import torch
 
 from .reference_state import (
@@ -8,7 +10,7 @@ from .reference_state import (
     FOOT_VELOCITY_XY, GRAVITY, JOINT_ACCELERATION, JOINT_OFFSET, JOINT_TORQUE, JOINT_VELOCITY, STUMBLE_EVENT,
 )
 from .state_spec import (
-    ELAPSED_TIME, FIRST_CONTACT, LAST_AIR_TIME, LAST_CONTACT_TIME, PREVIOUS_ACTION, PREVIOUS_PREVIOUS_ACTION,
+    CONTEXT_TERRAIN_FAMILY, ELAPSED_TIME, FIRST_CONTACT, LAST_AIR_TIME, LAST_CONTACT_TIME, PREVIOUS_ACTION, PREVIOUS_PREVIOUS_ACTION,
 )
 
 
@@ -40,8 +42,14 @@ def reference_reward_terms(task, state, action, next_state, failure):
     # LocoLab在新回合前两个控制步屏蔽二阶动作差分。
     smoothness_active = torch.round(next_state.memory[:, ELAPSED_TIME] / task.dt) >= 3
     failure = failure.float()
-    return {
-        "track_lin_vel_xy_exp": torch.exp(-(body_velocity[:, :2] - state.command[:, :2]).square().sum(-1)
+    tracked_velocity = body_velocity[:, :2]
+    if task.parkour:
+        family_ids = state.context[:, CONTEXT_TERRAIN_FAMILY].long()
+        special = task.special_family[family_ids]
+        tracked_x = torch.where(special, torch.minimum(body_velocity[:, 0], state.command[:, 0] + .1), body_velocity[:, 0])
+        tracked_velocity = torch.stack((tracked_x, body_velocity[:, 1]), -1)
+    terms = {
+        "track_lin_vel_xy_exp": torch.exp(-(tracked_velocity - state.command[:, :2]).square().sum(-1)
                                          / cfg.tracking_linear_variance),
         "track_ang_vel_z_exp": torch.exp(-(angular_velocity[:, 2] - state.command[:, 2]).square()
                                         / cfg.tracking_angular_variance),
@@ -72,3 +80,16 @@ def reference_reward_terms(task, state, action, next_state, failure):
         "is_alive": 1 - failure,
         "termination_penalty": failure,
     }
+    if task.parkour:
+        # 二阶段只启用上游 23 项，普通地形的三个附加项仍在其原配方中维护。
+        for name in ("body_orientation_l2", "stand_still_joint_vel_l2", "foot_slip"):
+            del terms[name]
+        terms["feet_air_time_variance"] = torch.where(special, 0., terms["feet_air_time_variance"])
+        terms["stuck"] = ((state.command[:, :2].norm(dim=-1) > .1) & (body_velocity[:, :2].norm(dim=-1) < .1)).float()
+        generalized = task.generalized_state(next_state)
+        rotation = generalized[1]
+        terms["cheat"] = ((rotation[:, 1, 0].abs() > rotation[:, 0, 0] * math.tan(.8)) & special).float()
+        points, velocities = task.kinematics.foot_volume_points(*generalized, task.volume_offsets)
+        penetration = (task.surface.edge_depth(points) * (velocities.norm(dim=-1) + 1e-6)).sum(-1)
+        terms["volume_points_penetration"] = penetration * task.edge_family[family_ids]
+    return terms

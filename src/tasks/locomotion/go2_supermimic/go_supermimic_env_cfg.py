@@ -5,6 +5,7 @@
 """
 
 from copy import deepcopy
+from math import log
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
@@ -20,6 +21,7 @@ from src.assets.robots.go2.go2_reference import get_reference_go2_robot_cfg
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
 from .mdp.state_spec import FOOT_NAMES
+from .mdp.parkour import reset_parkour_joints
 from .mdp.terrains import TerrainMap
 
 
@@ -88,6 +90,12 @@ def make_go2_supermimic_env_cfg(
             },
         ),
     }
+    if cfg.terrain.mode == "parkour":
+        events["reset_joints"] = EventTermCfg(
+            func=reset_parkour_joints, mode="reset",
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
+                    "scale_range": tuple(cfg.reset.joint_scale_range)},
+        )
     if cfg.domain_randomization.enabled:
         domain = cfg.domain_randomization
         for name, axis, distribution, bounds in (
@@ -108,6 +116,35 @@ def make_go2_supermimic_env_cfg(
                 "ranges": {axis: tuple(domain.com_range[name]) for axis, name in enumerate(("x", "y", "z"))},
             }),
         })
+        if domain.parkour_enabled:
+            events.update({
+                "base_mass": EventTermCfg(func=envs_mdp.dr.body_mass, mode="startup", params={
+                    "asset_cfg": SceneEntityCfg("robot", body_names=("base",)), "operation": "add",
+                    "ranges": tuple(domain.base_mass_range),
+                }),
+                "limb_mass": EventTermCfg(func=envs_mdp.dr.pseudo_inertia, mode="startup", params={
+                    "asset_cfg": SceneEntityCfg("robot", body_names=(".*_hip", ".*_thigh", ".*_calf")),
+                    "alpha_range": tuple(0.5 * log(value) for value in domain.limb_mass_scale_range),
+                }),
+                "pd_gains": EventTermCfg(func=envs_mdp.dr.pd_gains, mode="startup", params={
+                    "asset_cfg": SceneEntityCfg("robot", actuator_names=(".*",)), "operation": "scale",
+                    "kp_range": tuple(domain.pd_gain_range), "kd_range": tuple(domain.pd_gain_range),
+                }),
+                "joint_friction": EventTermCfg(func=envs_mdp.dr.joint_friction, mode=domain.joint_parameter_mode, params={
+                    "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)), "operation": "add",
+                    "ranges": tuple(domain.joint_friction_range),
+                }),
+                "joint_armature": EventTermCfg(func=envs_mdp.dr.joint_armature, mode=domain.joint_parameter_mode, params={
+                    "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)), "operation": "add",
+                    "ranges": tuple(domain.joint_armature_range),
+                }),
+            })
+        if domain.push_enabled:
+            events["push_robot"] = EventTermCfg(
+                func=envs_mdp.push_by_setting_velocity, mode="interval", is_global_time=True,
+                interval_range_s=(domain.push_interval_s, domain.push_interval_s),
+                params={"asset_cfg": SceneEntityCfg("robot"), "velocity_range": deepcopy(domain.push_velocity_range)},
+            )
 
     # ---------- 终止与任务逻辑边界 ----------
 

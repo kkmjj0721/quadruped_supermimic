@@ -112,6 +112,7 @@ class Go2ReferenceCfg(BaseConfig):
             "velocity_range": {},
         }
         joint_offset = {"position_range": (0.0, 0.0), "velocity_range": (0.0, 0.0)}
+        joint_scale_range = (0.7, 1.3)
 
     class viewer:
         """Go2跟随相机；距离以米计，角度以度计。"""
@@ -200,6 +201,7 @@ class Go2ReferenceCfg(BaseConfig):
         """Ri-5036 HIM地形追加正反金字塔斜坡；难度采用原有行走表现课程。"""
 
         mode = "flat"
+        asset_path = ""
         seed = None
         patch_size_m = (8.0, 8.0)
         core_rows = 6
@@ -224,12 +226,26 @@ class Go2ReferenceCfg(BaseConfig):
         roll_friction_range = (1e-5, 5e-3)
         encoder_bias_range = (-0.015, 0.015)
         com_range = {"x": (-0.025, 0.025), "y": (-0.025, 0.025), "z": (-0.03, 0.03)}
+        parkour_enabled = False
+        base_mass_range = (-1.5, 1.5)
+        limb_mass_scale_range = (0.8, 1.2)
+        pd_gain_range = (0.9, 1.1)
+        joint_friction_range = (0.0, 0.2)
+        joint_armature_range = (0.0, 0.01)
+        joint_parameter_mode = "reset"
+        push_enabled = False
+        push_interval_s = 10.0
+        push_velocity_range = {"x": (-0.5, 0.5), "y": (-0.5, 0.5)}
 
     class commands:
         """保留当前HIM采样与heading反馈，教师奖励评价body平移和body yaw。"""
 
         reference_steps_per_iteration = 1
+        parkour = False
         initial_ranges = ((-1.0, 1.0), (-1.0, 1.0), (-2.0, 2.0))
+        forward_ranges = ((0.7, 1.1), (0.0, 0.0), (-0.3, 0.3))
+        forward_heading_range = (-0.4, 0.4)
+        zero_velocity_threshold = 0.2
         stages = []
         zero_probability_start = 0.1
         zero_probability_end = 0.1

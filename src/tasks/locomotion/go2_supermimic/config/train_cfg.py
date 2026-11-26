@@ -11,6 +11,7 @@ from pathlib import Path
 TASK_MODES = {
     "Unitree-Go2-SuperMimic-Flat": "flat",
     "Unitree-Go2-SuperMimic-Rough": "rough",
+    "Unitree-Go2-SuperMimic-Parkour": "parkour",
 }
 
 

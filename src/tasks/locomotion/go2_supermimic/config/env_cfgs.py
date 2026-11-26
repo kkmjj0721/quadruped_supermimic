@@ -6,6 +6,7 @@ from copy import deepcopy
 from mjlab.envs import ManagerBasedRlEnvCfg
 
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
+from src.config.go2.go2_parkour_config import parkour_config
 
 from ..go_supermimic_env_cfg import make_go2_supermimic_env_cfg
 
@@ -15,6 +16,8 @@ def resolve_go2_supermimic_cfg(
 ) -> Go2ReferenceCfg:
     """覆盖完整任务参数；返回副本以便adapter与纯Tensor任务使用同一语义。"""
     cfg = deepcopy(go2_cfg) if go2_cfg is not None else Go2ReferenceCfg()
+    if terrain_mode == "parkour" and cfg.terrain.mode != "parkour":
+        cfg = parkour_config(cfg)
     if terrain_mode is not None:
         cfg.terrain.mode = terrain_mode
     if play:
@@ -45,3 +48,10 @@ def unitree_go2_flat_env_cfg(
 ) -> ManagerBasedRlEnvCfg:
     """创建平地配置，沿用同一套任务协议与名义控制参数。"""
     return _make_env_cfg(play, go2_cfg, "flat", terrain_map)
+
+
+def unitree_go2_parkour_env_cfg(
+    play: bool = False, *, go2_cfg: Go2ReferenceCfg | None = None, terrain_map=None,
+) -> ManagerBasedRlEnvCfg:
+    """创建资产布局驱动的二阶段 Parkour 环境配置。"""
+    return _make_env_cfg(play, go2_cfg, "parkour", terrain_map)

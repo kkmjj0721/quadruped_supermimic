@@ -7,6 +7,8 @@ import torch
 import numpy as np
 from mjlab.terrains.terrain_entity import _proportional_counts
 
+from .parkour import FORWARD_FAMILIES
+
 
 class CommandCurriculum:
     """只提供固定范围与进度计数，不进行速度课程。"""
@@ -14,7 +16,9 @@ class CommandCurriculum:
     def __init__(self, cfg, families, device="cpu"):
         self.cfg = deepcopy(cfg)
         self.device = torch.device(device)
-        self.initial_ranges = torch.tensor(self.cfg.initial_ranges, dtype=torch.float32, device=self.device).flatten()
+        self.range_table = torch.tensor(
+            [self.cfg.forward_ranges if self.cfg.parkour and name in FORWARD_FAMILIES else self.cfg.initial_ranges
+             for name in families], dtype=torch.float32, device=self.device).flatten(1)
         self.control_steps = 0
 
     @property
@@ -22,7 +26,7 @@ class CommandCurriculum:
         return self.control_steps
 
     def parameters(self, family_ids):
-        return (self.initial_ranges.expand(family_ids.numel(), -1),
+        return (self.range_table[family_ids],
                 torch.full((family_ids.numel(), 1), self.cfg.rel_standing_envs, device=self.device))
 
     def state_dict(self):
@@ -77,13 +81,17 @@ class TerrainCurriculum:
             return
         terrain = env.scene.terrain
         position = env.scene["robot"].data.root_link_pos_w[ids, :2]
-        distance = (position - self.episode_start_pos_w[ids]).norm(dim=-1)
-        time_left = env.max_episode_length_s - env.episode_length_buf[ids] * env.step_dt
-        commanded_distance = (self.commanded_displacement_w[ids].norm(dim=-1)
-                              + command[ids, :2].norm(dim=-1) * time_left.clamp_min(0))
         terrain_distance = (position - env.scene.env_origins[ids, :2]).norm(dim=-1)
-        move_up = (terrain_distance > self.map.size[0] / 2) & (commanded_distance >= 1.0)
-        move_down = (distance < commanded_distance * 0.5) & ~move_up
+        if self.map.cfg.mode == "parkour":
+            move_up = terrain_distance > self.map.size[0] / 2
+            move_down = (terrain_distance < command[ids, :2].norm(dim=-1) * env.max_episode_length_s * 0.5) & ~move_up
+        else:
+            distance = (position - self.episode_start_pos_w[ids]).norm(dim=-1)
+            time_left = env.max_episode_length_s - env.episode_length_buf[ids] * env.step_dt
+            commanded_distance = (self.commanded_displacement_w[ids].norm(dim=-1)
+                                  + command[ids, :2].norm(dim=-1) * time_left.clamp_min(0))
+            move_up = (terrain_distance > self.map.size[0] / 2) & (commanded_distance >= 1.0)
+            move_down = (distance < commanded_distance * 0.5) & ~move_up
         has_episode = (env.episode_length_buf[ids] > 0) & (env.common_step_counter > 0)
         move_up &= has_episode
         move_down &= has_episode
