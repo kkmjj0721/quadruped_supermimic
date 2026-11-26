@@ -20,6 +20,7 @@ def resolve_go2_supermimic_cfg(
     if play:
         cfg.noise.add_noise = False
         cfg.terrain.curriculum = False
+        cfg.teacher.exteroceptive_dropout = 0.0
     return cfg
 
 
