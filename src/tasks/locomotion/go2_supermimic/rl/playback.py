@@ -13,7 +13,6 @@ from mjlab.managers.command_manager import NullCommandManager
 from mjlab.utils.wrappers import VideoRecorder
 
 from agents.supermimic.interfaces import append_history
-from ..config.env_cfgs import resolve_go2_supermimic_cfg
 
 from ..config.train_cfg import TASK_MODES
 from .checkpoints import build_playback_policy, load_playback_source
@@ -221,38 +220,33 @@ def make_playback(task_id, *, checkpoint_file=None, agent="trained", num_envs=No
     task_mode = TASK_MODES[task_id]
     dummy_action = {"trained": None, "zero": torch.zeros, "random": torch.rand}[agent]
     source = load_playback_source(task_id, checkpoint_file) if agent == "trained" else None
-    cfg = resolve_go2_supermimic_cfg(source.cfg if source is not None else None, terrain_mode=task_mode)
-    cfg.env.num_envs = num_envs if num_envs is not None else 1
-    torch.manual_seed(cfg.env.seed)
+    cfg = source.cfg if source is not None else None
     adapter = _PlaybackTransitionAdapter(
-        cfg, device=device, play=True, render_mode=render_mode, video_height=video_height,
+        cfg, device=device, play=True, terrain_mode=task_mode, num_envs=num_envs if num_envs is not None else 1,
+        render_mode=render_mode, video_height=video_height,
         video_width=video_width, no_terminations=no_terminations,
     )
-    try:
-        model = build_playback_policy(source, adapter) if source is not None else None
-        if source is not None:
-            _restore_curriculum(adapter, source.checkpoint)
-        env = SuperMimicPlayEnv(adapter)
-        env.reset()
+    model = build_playback_policy(source, adapter) if source is not None else None
+    if source is not None and source.cfg.terrain.mode == task_mode:
+        _restore_curriculum(adapter, source.checkpoint)
+    env = SuperMimicPlayEnv(adapter)
+    env.reset()
 
-        @torch.no_grad()
-        def policy(observations):
-            if model is not None:
-                return model(observations["history"], observations["heightmap"], observations["exteroceptive_mask"])
-            shape = (adapter.num_envs, adapter.task.spec.action_dim)
-            actions = dummy_action(shape, device=adapter.device)
-            return actions if agent == "zero" else 2 * actions - 1
+    @torch.no_grad()
+    def policy(observations):
+        if model is not None:
+            return model(observations["history"], observations["heightmap"], observations["exteroceptive_mask"])
+        shape = (adapter.num_envs, adapter.task.spec.action_dim)
+        actions = dummy_action(shape, device=adapter.device)
+        return actions if agent == "zero" else 2 * actions - 1
 
-        return env, policy
-    except BaseException:
-        adapter.close()
-        raise
+    return env, policy
 
 
 def make_playback_env(task_id, *, checkpoint_file=None, agent="trained", num_envs=None, device="cpu",
                       video=False, video_length=200, video_height=None, video_width=None,
                       no_terminations=False):
-    """在播放环境外按需装配录像；录像器不可用时关闭已建环境并继续抛出。"""
+    """在播放环境外按需装配录像。"""
     checkpoint = Path(checkpoint_file).expanduser().resolve() if checkpoint_file is not None else None
     record_video = checkpoint is not None and video
     if video and checkpoint is None:
@@ -264,12 +258,8 @@ def make_playback_env(task_id, *, checkpoint_file=None, agent="trained", num_env
     )
     if not record_video:
         return env, policy
-    try:
-        recorder = SuperMimicVideoRecorder(env, video_folder=checkpoint.parent / "videos" / "play",
-                                           step_trigger=lambda step: step == 0,
-                                           video_length=video_length, disable_logger=True)
-    except BaseException:
-        env.close()
-        raise
+    recorder = SuperMimicVideoRecorder(env, video_folder=checkpoint.parent / "videos" / "play",
+                                       step_trigger=lambda step: step == 0,
+                                       video_length=video_length, disable_logger=True)
     print("[INFO] Recording videos during play.")
     return recorder, policy

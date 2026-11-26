@@ -28,8 +28,6 @@ def main():
     parser.add_argument("--preset", choices=tuple(PRESETS), default="proof_ae910b8")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    if args.num_rows < 1 or args.num_cols < 1:
-        parser.error("Terrain row and column counts must be positive")
     output = (
         args.output
         if args.output is not None

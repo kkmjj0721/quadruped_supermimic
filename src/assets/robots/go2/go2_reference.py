@@ -15,7 +15,6 @@ from src import SRC_PATH
 
 
 GO2_XML: Path = SRC_PATH / "assets" / "robots" / "go2" / "xmls" / "go2_reference.xml"
-assert GO2_XML.exists()
 
 
 def get_spec() -> mujoco.MjSpec:

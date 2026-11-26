@@ -1,8 +1,6 @@
 # Copyright (c) 2026-2027 zh
 """内容：保持固定HIM速度范围，按Go2 HIM行走表现升降地形难度。"""
 
-from copy import deepcopy
-
 import torch
 import numpy as np
 from mjlab.terrains.terrain_entity import _proportional_counts
@@ -14,7 +12,7 @@ class CommandCurriculum:
     """只提供固定范围与进度计数，不进行速度课程。"""
 
     def __init__(self, cfg, families, device="cpu"):
-        self.cfg = deepcopy(cfg)
+        self.cfg = cfg
         self.device = torch.device(device)
         self.range_table = torch.tensor(
             [self.cfg.forward_ranges if self.cfg.parkour and name in FORWARD_FAMILIES else self.cfg.initial_ranges

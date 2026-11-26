@@ -2,7 +2,6 @@
 """内容：拟合物理模型与价值目标，以想象回报和真实速度监督更新策略。"""
 
 from contextlib import contextmanager, nullcontext
-from dataclasses import replace
 import math
 
 import torch
@@ -42,7 +41,7 @@ class Learner:
 
     def __init__(self, task, actor, model, critic, config, execution=None):
         self.task, self.actor, self.model, self.critic, self.config = task, actor, model, critic, config
-        self.execution = replace(execution) if execution is not None else ExecutionConfig()
+        self.execution = execution if execution is not None else ExecutionConfig()
         self._device_counts = torch.zeros(3, dtype=torch.int64, device=next(model.parameters()).device)
         self.reset_policy_optimizers()
         self.model_optimizer = self._make_optimizer("model")
@@ -109,7 +108,7 @@ class Learner:
         rate = cfg.learning_rate * (cfg.lr_final_frac + (1 - cfg.lr_final_frac) * .5 * (1 + math.cos(math.pi * progress)))
         rate *= self.lr_multiplier
         start = max(self.ramp_start, self.actor_frozen_until, self.policy_start)
-        ramp = min(1.0, max(0.0, iteration - start) / max(1, cfg.actor_ramp_iterations))
+        ramp = min(1.0, max(0.0, iteration - start) / cfg.actor_ramp_iterations)
         for group in self.actor_optimizer.param_groups:
             group["lr"] = rate * cfg.actor_lr_scale * ramp
         for optimizer in (self.model_optimizer, self.critic_optimizer):

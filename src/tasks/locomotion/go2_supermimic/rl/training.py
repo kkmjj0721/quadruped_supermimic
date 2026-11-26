@@ -39,8 +39,6 @@ def _resolve_task_config(task_id: str, args: SuperMimicTrainConfig):
     cfg = load_task_config(source)[0] if source is not None else Go2ReferenceCfg()
     mode = TASK_MODES[task_id]
     if mode == "parkour" and cfg.terrain.mode != "parkour":
-        if args.task_config is not None:
-            raise ValueError("An explicit Parkour task configuration must declare terrain.mode='parkour'")
         if resume is not None and args.continue_run:
             raise ValueError("Rough-to-Parkour requires a hot start with continue_run=False")
         cfg = parkour_config(cfg)
@@ -126,34 +124,26 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
         if resume is not None:
             print(f"[INFO] Loading model checkpoint from: {resume}", flush=True)
             restore_started = time.perf_counter()
-            try:
-                runner.load(resume, continue_run=args.continue_run, reset_critic=args.reset_critic)
-            finally:
-                timing.record_wall("restore", time.perf_counter() - restore_started)
+            runner.load(resume, continue_run=args.continue_run, reset_critic=args.reset_critic)
+            timing.record_wall("restore", time.perf_counter() - restore_started)
         starting_steps, starting_iteration = runner.real_steps, runner.iteration
         starting_prefill_steps = runner.prefill_real_steps
         target_iteration = runtime.max_iterations
-        if target_iteration <= runner.iteration:
-            raise ValueError(f"Target iteration {target_iteration} must exceed checkpoint iteration {runner.iteration}")
         runner.configure_logging(target_iteration=target_iteration, log_interval=runtime.log_interval)
         while runner.iteration < target_iteration:
             remaining = target_iteration - runner.iteration
             until_checkpoint = runtime.save_interval - runner.iteration % runtime.save_interval
             learn_started = time.perf_counter()
-            try:
-                runner.learn(min(remaining, until_checkpoint))
-            finally:
-                timing.record_wall("learn_blocks", time.perf_counter() - learn_started)
+            runner.learn(min(remaining, until_checkpoint))
+            timing.record_wall("learn_blocks", time.perf_counter() - learn_started)
             # 参考在塌缩护栏首次预警时跳过该保存点。
             if runner._collapse_strikes == 0:
                 checkpoint = log_dir / f"model_{runner.iteration}.pt"
                 runner.save(checkpoint)
                 print(f"[INFO] Saved checkpoint: {checkpoint}", flush=True)
     finally:
-        try:
-            runner.close()
-        finally:
-            runner.env.close()
+        runner.close()
+        runner.env.close()
     if torch.device(device).type == "cuda":
         torch.cuda.synchronize(device)
     entry_seconds = time.perf_counter() - entry_started
@@ -176,7 +166,7 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
     summary["scope"].update({
         "entry_total": "launch_training entry through logger/environment close and final target-device synchronization; excludes this summary write",
         "learn_blocks": "Inclusive host wall of runner.learn calls; includes prefill, setup and per-iteration logging, excludes outer checkpoint save",
-        "save_total": "Checkpoint serialization and one temporary-file replacement",
+        "save_total": "Direct checkpoint serialization",
         "process_wall": "Not measured here; the explicit training test launcher measures child-process wall externally",
         "transitions": "New steps subtract restored counters; entry_real_transitions_per_second includes prefill, entry_training_transitions_per_second excludes it",
     })

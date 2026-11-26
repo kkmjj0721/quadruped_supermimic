@@ -29,7 +29,7 @@ def make_go2_supermimic_env_cfg(
     cfg: Go2ReferenceCfg | None = None, *, terrain_map: TerrainMap | None = None,
 ) -> ManagerBasedRlEnvCfg:
     """返回可直接构造MjLab环境的配置，不复用任何PPO任务内部实现。"""
-    cfg = deepcopy(cfg) if cfg is not None else Go2ReferenceCfg()
+    cfg = cfg if cfg is not None else Go2ReferenceCfg()
     terrain_map = terrain_map if terrain_map is not None else TerrainMap(cfg.terrain)
 
     # ---------- 场景 ----------

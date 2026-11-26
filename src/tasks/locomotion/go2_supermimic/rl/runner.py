@@ -126,30 +126,26 @@ class Go2SuperMimicRunner(SuperMimicRunner):
 
 
 def make_go2_supermimic_runner(cfg=None, *, device="cpu", log_dir=None, execution=None):
-    """构造任务环境、可选驱动策略和任务快照，失败时释放仿真资源。"""
+    """构造任务环境、可选驱动策略和任务快照。"""
     cfg = cfg if cfg is not None else Go2ReferenceCfg()
     config = algorithm_config(cfg)
     if execution is None:
         execution = ExecutionConfig(**{field.name: getattr(cfg.runner, field.name) for field in fields(ExecutionConfig)})
     torch.manual_seed(cfg.env.seed)
     env = make_go2_supermimic_env(cfg, device=device)
-    try:
-        runner = Go2SuperMimicRunner(env, config, log_dir=log_dir,
-                                     control_enabled=cfg.runner.enable_control_updates, execution=execution,
-                                     collection_groups=env.terrain_curriculum.family_ids)
-        if cfg.runner.driver.policy:
-            from .driver import MoeCtsDriver
-            runner.driver = MoeCtsDriver(cfg.runner.driver.policy, env.num_envs, env.task.default_joint_pos,
-                                         cfg.control.action_scales, runner.device)
-        if cfg.runner.driver.expert_policy:
-            from .driver import ActorDriver
-            runner.expert = ActorDriver(cfg.runner.driver.expert_policy, runner.device)
-        if log_dir is not None:
-            snapshot = {"config": env.cfg.to_dict()}
-            destination = Path(log_dir)
-            destination.mkdir(parents=True, exist_ok=True)
-            (destination / "task_config.json").write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
-        return runner
-    except BaseException:
-        env.close()
-        raise
+    runner = Go2SuperMimicRunner(env, config, log_dir=log_dir,
+                                 control_enabled=cfg.runner.enable_control_updates, execution=execution,
+                                 collection_groups=env.terrain_curriculum.family_ids)
+    if cfg.runner.driver.policy:
+        from .driver import MoeCtsDriver
+        runner.driver = MoeCtsDriver(cfg.runner.driver.policy, env.num_envs, env.task.default_joint_pos,
+                                     cfg.control.action_scales, runner.device)
+    if cfg.runner.driver.expert_policy:
+        from .driver import ActorDriver
+        runner.expert = ActorDriver(cfg.runner.driver.expert_policy, runner.device)
+    if log_dir is not None:
+        snapshot = {"config": env.cfg.to_dict()}
+        destination = Path(log_dir)
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "task_config.json").write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
+    return runner

@@ -78,8 +78,6 @@ def _resolve_checkpoint(cfg: PlayConfig) -> Path | None:
     if cfg.checkpoint_file is None:
         raise ValueError("Trained playback requires --checkpoint-file.")
     checkpoint = Path(cfg.checkpoint_file).expanduser().resolve()
-    if not checkpoint.is_file():
-        raise FileNotFoundError(f"Checkpoint file not found: {checkpoint}")
     print(f"[INFO] Loading checkpoint: {checkpoint}", flush=True)
     return checkpoint
 

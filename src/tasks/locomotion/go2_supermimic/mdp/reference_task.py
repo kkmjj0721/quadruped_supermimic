@@ -1,7 +1,6 @@
 # Copyright (c) 2026-2027 zh
 """内容：将PROOF官方教师的高程、本体观测和奖励接入Go2可微世界模型。"""
 
-from copy import deepcopy
 import math
 
 import torch
@@ -37,7 +36,7 @@ class Go2ReferenceTaskModel:
 
     def __init__(self, cfg, default_joint_pos: Tensor, joint_limits: Tensor, surface, device="cpu"):
         self.parkour = cfg.terrain.mode == "parkour"
-        self.cfg = deepcopy(cfg)
+        self.cfg = cfg
         self.device = torch.device(device)
         self.surface = surface
         self.dt = cfg.sim.timestep * cfg.control.decimation

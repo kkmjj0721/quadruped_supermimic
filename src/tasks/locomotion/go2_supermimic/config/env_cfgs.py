@@ -15,9 +15,11 @@ def resolve_go2_supermimic_cfg(
     go2_cfg: Go2ReferenceCfg | None = None, *, play: bool = False, terrain_mode: str | None = None,
 ) -> Go2ReferenceCfg:
     """覆盖完整任务参数；返回副本以便adapter与纯Tensor任务使用同一语义。"""
-    cfg = deepcopy(go2_cfg) if go2_cfg is not None else Go2ReferenceCfg()
+    cfg = go2_cfg if go2_cfg is not None else Go2ReferenceCfg()
     if terrain_mode == "parkour" and cfg.terrain.mode != "parkour":
         cfg = parkour_config(cfg)
+    elif go2_cfg is not None:
+        cfg = deepcopy(cfg)
     if terrain_mode is not None:
         cfg.terrain.mode = terrain_mode
     if play:

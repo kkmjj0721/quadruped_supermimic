@@ -17,7 +17,6 @@ from agents.supermimic.export import export_policy
 from agents.supermimic.policy import make_actor
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
-from ..config.train_cfg import TASK_MODES
 from ..config.loading import load_task_config
 from ..mdp.reference_task import Go2ReferenceTaskModel
 
@@ -34,8 +33,6 @@ def load_playback_source(task_id: str, checkpoint_file: str | Path) -> PlaybackS
     """读取可信本项目检查点及同目录的完整任务快照，不创建仿真。"""
     path = Path(checkpoint_file).expanduser().resolve()
     cfg, _ = load_task_config(path.parent / "task_config.json")
-    if cfg.terrain.mode != TASK_MODES[task_id]:
-        raise ValueError("Playback task terrain mode differs from the saved configuration")
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     return PlaybackSource(cfg, checkpoint)
 
@@ -63,10 +60,6 @@ def export_checkpoint(checkpoint_path: str | Path, directory: str | Path, *, ite
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     actor, algorithm = checkpoint_actor(checkpoint)
     cfg, _ = load_task_config(path.parent / "task_config.json")
-    if (actor.observation_dim != cfg.env.num_observations or actor.history_length != cfg.env.num_obs_history
-            or cfg.env.num_obs != actor.observation_dim * actor.history_length
-            or actor.heightmap_dim != cfg.env.heightmap_dim):
-        raise ValueError("Checkpoint observation layout differs from the saved task configuration")
     iteration = checkpoint["iteration"] if iteration is None else iteration
     from .deployment import deployment_metadata
 

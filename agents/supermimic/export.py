@@ -3,10 +3,8 @@
 
 from copy import deepcopy
 import json
-import os
 from pathlib import Path
 import shutil
-from tempfile import TemporaryDirectory
 
 import torch
 
@@ -15,8 +13,7 @@ from .policy import Mlp
 
 def _prepare_policy(actor, iteration, metadata):
     """冻结部署副本并生成导出元数据。"""
-    runtime_precision = "bf16" if any(layer.use_bf16 for layer in actor.modules() if isinstance(layer, Mlp)) else "fp32"
-    source_precision = (metadata or {}).get("source_network_precision", runtime_precision)
+    source_precision = metadata["source_network_precision"]
     module = deepcopy(actor).cpu().eval().requires_grad_(False)
     # 部署副本统一使用 FP32，训练策略的精度开关保持原值。
     for layer in module.modules():
@@ -38,7 +35,7 @@ def _prepare_policy(actor, iteration, metadata):
         },
     }
     information = {
-        **(metadata or {}), "format": "supermimic_proof_teacher_policy_v1",
+        **metadata, "format": "supermimic_proof_teacher_policy_v1",
         "iteration": iteration,
         "input_names": ["obs_history", "heightmap", "exteroceptive_mask"],
         "output_name": "actions", "dtype": "float32",
@@ -62,7 +59,7 @@ def _prepare_policy(actor, iteration, metadata):
 
 
 def _write_onnx(module, path, information):
-    """把完整策略与元数据写入尚未发布的ONNX文件。"""
+    """把完整策略与元数据写入ONNX文件。"""
     import onnx
 
     inputs = (torch.zeros(1, module.history_length * module.observation_dim),
@@ -80,23 +77,19 @@ def _write_onnx(module, path, information):
     onnx.save(model, path)
 
 
-def export_policy(actor, directory, *, iteration: int, metadata=None):
-    """显式部署导出保留PT／ONNX／JSON及轮次副本，各产物原子替换。"""
+def export_policy(actor, directory, *, iteration: int, metadata):
+    """直接导出PT／ONNX／JSON轮次文件，并更新固定名称副本。"""
     module, information = _prepare_policy(actor, iteration, metadata)
 
     destination = Path(directory)
     destination.mkdir(parents=True, exist_ok=True)
     paths = {"pt": destination / f"policy_{iteration}.pt", "onnx": destination / f"policy_{iteration}.onnx",
              "metadata": destination / f"policy_{iteration}.json"}
-    with TemporaryDirectory(prefix=".policy_export_", dir=destination) as temporary:
-        temporary = Path(temporary)
-        torch.jit.script(module).save(str(temporary / "policy.pt"))
-        _write_onnx(module, temporary / "policy.onnx", information)
-        (temporary / "policy.json").write_text(json.dumps(information, ensure_ascii=False, allow_nan=False, indent=2) + "\n", encoding="utf-8")
-        for kind, path in paths.items():
-            filename = "policy.json" if kind == "metadata" else f"policy.{kind}"
-            shutil.copyfile(temporary / filename, temporary / path.name)
-            os.replace(temporary / path.name, path)
-            os.replace(temporary / filename, destination / filename)
+    torch.jit.script(module).save(str(paths["pt"]))
+    _write_onnx(module, paths["onnx"], information)
+    paths["metadata"].write_text(json.dumps(information, ensure_ascii=False, allow_nan=False, indent=2) + "\n", encoding="utf-8")
+    for kind, path in paths.items():
+        filename = "policy.json" if kind == "metadata" else f"policy.{kind}"
+        shutil.copyfile(path, destination / filename)
     return paths
 

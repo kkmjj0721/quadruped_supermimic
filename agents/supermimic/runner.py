@@ -7,7 +7,6 @@ from copy import deepcopy
 from collections import defaultdict
 from dataclasses import asdict
 import json
-import os
 from pathlib import Path
 import time
 
@@ -43,8 +42,8 @@ class SuperMimicRunner:
                  collection_groups=None):
         self.env, self.task, self.spec = env, env.task, env.task.spec
         self.device = torch.device(env.device)
-        self.config = SuperMimicConfig(**asdict(config))
-        self.execution = ExecutionConfig(**asdict(execution)) if execution is not None else ExecutionConfig()
+        self.config = config
+        self.execution = execution if execution is not None else ExecutionConfig()
         self.timing = TrainingTiming(self.device, enabled=self.execution.detailed_timing,
                                      interval=self.execution.timing_interval)
         cfg = self.config
@@ -209,7 +208,11 @@ class SuperMimicRunner:
     def _driver_scale(self):
         """驱动占比按参考实现从起始值线性衰减到结束值。"""
         start, end = self.config.driver_fade
-        return min(1.0, max(0.0, (end - self.iteration) / max(1, end - start)))
+        if self.iteration < start:
+            return 1.0
+        if self.iteration >= end:
+            return 0.0
+        return (end - self.iteration) / (end - start)
 
     def _reset_drivers(self, done):
         """任务子类在回合结束时清理外部策略状态；默认没有外部策略。"""
@@ -461,8 +464,8 @@ class SuperMimicRunner:
                             "timing/session_elapsed_seconds": session_elapsed,
                             "timing/eta_seconds": session_elapsed / self.session_iterations * (target - self.iteration),
                             "timing/cuda_events": float(self.device.type == "cuda"),
-                            "performance/real_total_fps": metrics["real_steps_delta"] / max(elapsed, 1e-9),
-                            "performance/real_collection_fps": metrics["real_steps_delta"] / max(collection_time, 1e-9)})
+                            "performance/real_total_fps": metrics["real_steps_delta"] / elapsed,
+                            "performance/real_collection_fps": metrics["real_steps_delta"] / collection_time})
             if metrics["episode/completed"]:
                 metrics["episode/failure_fraction"] = metrics["failures"] / metrics["episode/completed"]
                 metrics["episode/timeout_fraction"] = metrics["timeouts"] / metrics["episode/completed"]
@@ -505,9 +508,7 @@ class SuperMimicRunner:
     def save(self, path):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        torch.save(self._checkpoint_state(), temporary)
-        os.replace(temporary, path)
+        torch.save(self._checkpoint_state(), path)
         if self._collapse_strikes == 0:
             self._remember_safe_policy()
 

@@ -38,9 +38,13 @@ class Go2TransitionAdapter:
 
     # ---------- 初始化 ----------
 
-    def __init__(self, cfg=None, *, device="cpu", play=False, render_mode=None,
+    def __init__(self, cfg=None, *, device="cpu", play=False, render_mode=None, terrain_mode=None, num_envs=None,
                  video_height=None, video_width=None, no_terminations=False):
-        self.cfg = resolve_go2_supermimic_cfg(cfg, play=play)
+        self.cfg = resolve_go2_supermimic_cfg(cfg, play=play, terrain_mode=terrain_mode)
+        if num_envs is not None:
+            self.cfg.env.num_envs = num_envs
+        if play:
+            torch.manual_seed(self.cfg.env.seed)
         self.play = play
         self.no_terminations = no_terminations
         self.map = TerrainMap(self.cfg.terrain)
@@ -56,56 +60,52 @@ class Go2TransitionAdapter:
         self.raw_env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
         if not self.play:
             self.raw_env.step = MethodType(step_manual_reset, self.raw_env)
-        try:
-            self.num_envs = self.raw_env.num_envs
-            self.robot = self.raw_env.scene["robot"]
-            self.device = self.robot.data.joint_pos.device
-            terrain = self.raw_env.scene.terrain
-            self.map.bind(terrain.terrain_origins)
-            self.surface = (PlaneSurface(device=self.device) if self.cfg.terrain.mode == "flat" else
-                            TerrainSurface.from_model(self.raw_env.sim.mj_model, self.device, terrain_map=self.map))
-            self.task = Go2ReferenceTaskModel(self.cfg, self.robot.data.default_joint_pos[0].clone(),
-                                  self.robot.data.soft_joint_pos_limits[0].clone(), self.surface, device=self.device)
-            self.task.bind_env(self.raw_env)
-            self.foot_geom_id = self.raw_env.sim.mj_model.geom("robot/FL_foot_collision").id
-            self.base_body_id = self.raw_env.sim.mj_model.body("robot/base").id
-            self.nominal_body_ipos = torch.as_tensor(
-                self.raw_env.sim.mj_model.body_ipos[self.base_body_id].copy(), device=self.device)
-            self.command_curriculum = CommandCurriculum(self.cfg.commands, self.map.family_names, self.device)
-            self.terrain_curriculum = TerrainCurriculum(
-                self.map, self.num_envs, self.cfg.terrain.max_init_level, enabled=self.cfg.terrain.curriculum,
-                episode_length_s=self.cfg.env.episode_length_s, device=self.device)
-            if not self.map.plane:
-                self.terrain_curriculum.family_ids.copy_(terrain.terrain_types)
-            if self.cfg.terrain.mode == "parkour":
-                self.column_family_ids = torch.tensor(
-                    [PARKOUR_FAMILIES.index(name) for name in self.map.family_names], device=self.device)
-                eligible = [name not in SPECIAL_FAMILIES for name in self.map.family_names]
-                env_families = [self.map.family_names[index] for index in self.terrain_curriculum.family_ids.cpu().tolist()]
-                self.terrain_family_rows = {
-                    name: torch.tensor([index for index, family in enumerate(env_families) if family == name], device=self.device)
-                    for name in dict.fromkeys(env_families)
-                }
-            else:
-                eligible = [name != "flat" for name in self.map.family_names]
-                self.terrain_family_rows = {}
-            self.mask_eligible = torch.tensor(eligible, device=self.device)
-            self.terrain_half_size = torch.tensor(
-                (self.map.rows * self.map.size[0] / 2 + 4., self.map.cols * self.map.size[1] / 2 + 4.), device=self.device)
-            self.context_version = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-            self._state = None
-            self._play_commands = None
-            self.last_metrics = {}
-            self._episode_reward_sums = {name: torch.zeros(self.num_envs, device=self.device)
-                                         for name in self.cfg.to_dict()["reward"]["scales"]}
-            self._reward_names = tuple(self.task.reward_scales)
-            compiled = not self.play and self.device.type == "cuda" and self.cfg.runner.cuda_graph
-            self.task.configure_collection_compile(enabled=compiled, backend=self.cfg.algo.compile_backend)
-            self._transition_kernel = (compile_kernel(self._transition_tensors, self.cfg.algo.compile_backend)
-                                       if compiled else self._transition_tensors)
-        except BaseException:
-            self.raw_env.close()
-            raise
+        self.num_envs = self.raw_env.num_envs
+        self.robot = self.raw_env.scene["robot"]
+        self.device = self.robot.data.joint_pos.device
+        terrain = self.raw_env.scene.terrain
+        self.map.bind(terrain.terrain_origins)
+        self.surface = (PlaneSurface(device=self.device) if self.cfg.terrain.mode == "flat" else
+                        TerrainSurface.from_model(self.raw_env.sim.mj_model, self.device, terrain_map=self.map))
+        self.task = Go2ReferenceTaskModel(self.cfg, self.robot.data.default_joint_pos[0].clone(),
+                              self.robot.data.soft_joint_pos_limits[0].clone(), self.surface, device=self.device)
+        self.task.bind_env(self.raw_env)
+        self.foot_geom_id = self.raw_env.sim.mj_model.geom("robot/FL_foot_collision").id
+        self.base_body_id = self.raw_env.sim.mj_model.body("robot/base").id
+        self.nominal_body_ipos = torch.as_tensor(
+            self.raw_env.sim.mj_model.body_ipos[self.base_body_id].copy(), device=self.device)
+        self.command_curriculum = CommandCurriculum(self.cfg.commands, self.map.family_names, self.device)
+        self.terrain_curriculum = TerrainCurriculum(
+            self.map, self.num_envs, self.cfg.terrain.max_init_level, enabled=self.cfg.terrain.curriculum,
+            episode_length_s=self.cfg.env.episode_length_s, device=self.device)
+        if not self.map.plane:
+            self.terrain_curriculum.family_ids.copy_(terrain.terrain_types)
+        if self.cfg.terrain.mode == "parkour":
+            self.column_family_ids = torch.tensor(
+                [PARKOUR_FAMILIES.index(name) for name in self.map.family_names], device=self.device)
+            eligible = [name not in SPECIAL_FAMILIES for name in self.map.family_names]
+            env_families = [self.map.family_names[index] for index in self.terrain_curriculum.family_ids.cpu().tolist()]
+            self.terrain_family_rows = {
+                name: torch.tensor([index for index, family in enumerate(env_families) if family == name], device=self.device)
+                for name in dict.fromkeys(env_families)
+            }
+        else:
+            eligible = [name != "flat" for name in self.map.family_names]
+            self.terrain_family_rows = {}
+        self.mask_eligible = torch.tensor(eligible, device=self.device)
+        self.terrain_half_size = torch.tensor(
+            (self.map.rows * self.map.size[0] / 2 + 4., self.map.cols * self.map.size[1] / 2 + 4.), device=self.device)
+        self.context_version = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._state = None
+        self._play_commands = None
+        self.last_metrics = {}
+        self._episode_reward_sums = {name: torch.zeros(self.num_envs, device=self.device)
+                                     for name in self.cfg.to_dict()["reward"]["scales"]}
+        self._reward_names = tuple(self.task.reward_scales)
+        compiled = not self.play and self.device.type == "cuda" and self.cfg.runner.cuda_graph
+        self.task.configure_collection_compile(enabled=compiled, backend=self.cfg.algo.compile_backend)
+        self._transition_kernel = (compile_kernel(self._transition_tensors, self.cfg.algo.compile_backend)
+                                   if compiled else self._transition_tensors)
 
     @property
     def step_dt(self):

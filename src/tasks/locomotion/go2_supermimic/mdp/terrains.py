@@ -73,7 +73,7 @@ class TerrainMap:
     """按普通地形生成器或预打包 Parkour 资产声明地图布局。"""
 
     def __init__(self, cfg):
-        self.cfg = deepcopy(cfg)
+        self.cfg = cfg
         self.plane = cfg.mode == "flat"
         if cfg.mode == "parkour":
             from .parkour_terrains import parkour_generator
@@ -230,7 +230,9 @@ class TerrainGeometry:
             values = torch.cat([self._field_heights(chunk, bucket) for chunk in points.split(65536)])
             region = heights[y0:y1, x0:x1]
             region.copy_(torch.maximum(region, values.reshape(region.shape)))
-        return torch.where(torch.isfinite(heights), heights, 0).float()
+        # 核心之外采用平面边框；核心内缺失表面保持非有限值，直接暴露几何缺洞。
+        outside = (ys[:, None].abs() > self.half_grid[1]) | (xs[None, :].abs() > self.half_grid[0])
+        return torch.where(outside, 0, heights).float()
 
     def _field_heights(self, points, bucket):
         info, sizes = self.field_info[bucket], self.field_shapes[bucket]
@@ -303,7 +305,7 @@ class TerrainSurface:
         upper = (float(origins[:, 0].max() + cfg.field_half_m), float(origins[:, 1].max() + cfg.field_half_m))
         self.res = cfg.field_resolution_m
         geometry = TerrainGeometry.from_model(model, terrain_map=terrain_map)
-        payload = f"reference_heightfield_v1/{geometry.geometry_hash}/{self.origin}/{upper}/{self.res}"
+        payload = f"reference_heightfield_v2/{geometry.geometry_hash}/{self.origin}/{upper}/{self.res}"
         self.geometry_hash = hashlib.sha256(payload.encode()).hexdigest()
         from pathlib import Path
         path = Path(cfg.field_cache_dir) / f"heightfield_blind_{self.geometry_hash[:12]}.pt"
