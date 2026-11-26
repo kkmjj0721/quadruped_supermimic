@@ -2,15 +2,12 @@
 """内容：将PROOF官方教师的高程、本体观测和奖励接入Go2可微世界模型。"""
 
 from copy import deepcopy
-import hashlib
-import json
 import math
 
 import torch
 from torch import Tensor
 
 from agents.supermimic.compilation import compile_kernel
-from agents.supermimic.config import RUNNER_RUNTIME_FIELDS
 from agents.supermimic.interfaces import AlgorithmSpec, TaskState
 
 from .reference_rewards import reference_reward_terms
@@ -69,28 +66,13 @@ class Go2ReferenceTaskModel:
         self.noise_amplitude = self.default_joint_pos.new_tensor(
             (noise.base_ang_vel,) * 3 + (noise.projected_gravity,) * 3 + (0.,) * 3
             + (noise.joint_pos,) * 12 + (noise.joint_vel,) * 12 + (0.,) * 12) * cfg.noise.noise_level
-        payload = {"task": self._semantic_config(), "geometry": surface.geometry_hash,
-                   "default_joint_pos": self.default_joint_pos.cpu().tolist(),
-                   "joint_limits": self.joint_limits.cpu().tolist(),
-                   "layout": "proof_teacher_physical147_quat4_memory54_context27_critic285_contact_events_v3",
-                   "contact_force_frame": "world_force_on_robot",
-                   "dynamics": "blinkmimic_residual_fk_quaternion_v1"}
-        self.semantic_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         self.spec = AlgorithmSpec(
             state_dim=PHYSICAL_DIM + 4, delta_dim=PHYSICAL_DIM - 45, action_dim=12,
             observation_dim=45, privileged_dim=cfg.env.num_critic_obs, context_dim=CONTEXT_DIM,
             memory_dim=MEMORY_DIM, command_dim=3, heightmap_dim=self.heightmap_dim,
             history_length=cfg.env.num_obs_history,
-            semantic_id="go2_proof_teacher_ae910b8_contact_events_residual_fk_v3:" + self.semantic_hash,
+            semantic_id="go2_proof_teacher_ae910b8_contact_events_residual_fk_v3",
             model_id="supermimic_proof_teacher_v2")
-
-    def _semantic_config(self) -> dict:
-        """运行预算不改变任务语义；模型与观测结构由快照完整描述。"""
-        config = self.cfg.to_dict()
-        config["runner"] = {name: value for name, value in config["runner"].items() if name not in RUNNER_RUNTIME_FIELDS}
-        for name in ("actor_optimizer", "wm_optimizer", "muon_weight_decay"):
-            config["algo"].pop(name)
-        return config
 
     # ---------- 真实物理状态 ----------
 

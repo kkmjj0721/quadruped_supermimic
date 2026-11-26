@@ -165,4 +165,4 @@ class TrainingTiming:
                           "cuda": "Stream event intervals including possible host submission gaps; not kernel-only time",
                           "iteration_wall": "Host call wall; completion_boundary=false may leave device work pending; metrics_windows session wall includes boundary wait, guard and logging",
                           "sampling": "Stage statistics cover sampled calls only; no extrapolation to unsampled iterations",
-                          "nesting": "Coarse model/control and save_total contain their respective detail/export children"}}
+                          "nesting": "Coarse model/control contain their detail children; save_total measures checkpoint serialization and replacement"}}

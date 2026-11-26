@@ -166,7 +166,9 @@ class Learner:
         with timing.section("actor_update") if timing is not None else nullcontext():
             self.actor_optimizer.zero_grad(set_to_none=True)
             feature_batches, target_batches = [], []
-            metrics = {}
+            metrics = {name: seed.history.new_zeros(()) for name in (
+                "control_loss", "velocity_loss", "actor_loss", "imagination/survival_h",
+                "imagination/discounted_reward", "imagination/bootstrap", "imagination/reward")}
             velocity_mse_axes = seed.history.new_zeros(3)
             with frozen(self.model, self.critic):
                 for start in range(0, batch, self.execution.imag_microbatch):
@@ -192,7 +194,7 @@ class Learner:
                               "imagination/bootstrap": data.bootstrap.detach().mean(),
                               "imagination/reward": data.rewards.mean()}
                     for name, value in values.items():
-                        metrics[name] = metrics.get(name, 0) + value * weight
+                        metrics[name] = metrics[name] + value * weight
                     del data, targets, loss, control_loss, velocity_loss, velocity_error, velocity, target_velocity, values, part
                 metrics["velocity_rmse"] = velocity_mse_axes.mean().sqrt()
                 for axis, value in zip(("x", "y", "z"), velocity_mse_axes.sqrt()):

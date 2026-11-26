@@ -162,8 +162,7 @@ class Go2TransitionAdapter:
         if self._state is None:
             self._state = reset_state.detached_clone()
         else:
-            for name in ("physical", "memory", "command", "context"):
-                getattr(self._state, name)[ids] = getattr(reset_state, name)
+            self._state.data[ids] = reset_state.data
         self.terrain_curriculum.reset(ids, self.robot.data.root_link_pos_w[ids, :2])
         self.context_version[ids] += 1
         for values in self._episode_reward_sums.values():
@@ -173,8 +172,6 @@ class Go2TransitionAdapter:
     def reset(self, env_ids=None):
         """外部reset不计晋级，保留已加载的课程阶段与逻辑等级。"""
         ids = torch.arange(self.num_envs, device=self.device) if env_ids is None else env_ids
-        if ids.numel() == 0:
-            return self._state.detached_clone()
         self._reset_rows(ids)
         self.last_metrics = {}
         return self._state.detached_clone()
@@ -240,7 +237,7 @@ class Go2TransitionAdapter:
         self.last_metrics.update(episode_metrics)
         self.last_metrics.update(terrain_level=self.terrain_curriculum.levels.float().mean(),
                                  command_stage_iteration=float(self.command_curriculum.iteration))
-        return EnvStep(final, self._state.detached_clone(), reward, terminated, truncated, versions)
+        return EnvStep(final, self._state, reward, terminated, truncated, versions)
 
     # ---------- 课程持久化与资源释放 ----------
 

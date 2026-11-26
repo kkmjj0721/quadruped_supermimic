@@ -43,7 +43,7 @@ def format_training_log(metrics: dict[str, int | float], *, num_envs: int, devic
         return f"{values[key]:.0f}" if count else f"{values[key]:.{decimals}f}"
 
     def duration(key: str) -> str:
-        return str(timedelta(seconds=int(max(0, values[key]))))
+        return str(timedelta(seconds=int(values[key])))
 
     def row(label: str, value: str) -> str:
         return f"{label + ':':>40} {value}"
@@ -68,7 +68,7 @@ def format_training_log(metrics: dict[str, int | float], *, num_envs: int, devic
         ("Mean velocity estimation loss", "velocity_loss", control_available),
         ("Mean total actor loss", "actor_loss", control_available),
     ):
-        if available and (key == "wm_loss" or key in values):
+        if available:
             lines.append(row(label, number(key)))
     lines.append(row("Control learning rate", f"{values['control_learning_rate']:.2e}"))
     for label, key in (("Mean reward", "episode/return_mean"), ("Mean episode length", "episode/length_steps_mean")):
@@ -83,7 +83,7 @@ def format_training_log(metrics: dict[str, int | float], *, num_envs: int, devic
     for label, key in (("Metrics/linear_velocity_rmse", "task/tracking_linear_mse"),
                        ("Metrics/yaw_rate_rmse", "task/tracking_angular_mse")):
         if key in values:
-            lines.append(row(label, f"{math.sqrt(max(0, values[key])):.4f}"))
+            lines.append(row(label, f"{math.sqrt(values[key]):.4f}"))
     if "task/action_rms" in values:
         lines.append(row("Metrics/action_rms", number("task/action_rms")))
     if "velocity_rmse" in values:
@@ -133,12 +133,11 @@ class TrainingLogger:
             for source, tag in (("task/tracking_linear_mse", "Metrics/tracking/linear_velocity_rmse"),
                                 ("task/tracking_angular_mse", "Metrics/tracking/yaw_rate_rmse")):
                 if source in values:
-                    self._writer.add_scalar(tag, math.sqrt(max(0, values[source])), iteration)
-            if "timing/session_elapsed_seconds" in values:
-                seconds = int(values["timing/session_elapsed_seconds"])
-                for source in ("episode/return_mean", "episode/length_steps_mean"):
-                    if source in values:
-                        self._writer.add_scalar(_SCALAR_GROUPS[source] + "/time", values[source], seconds)
+                    self._writer.add_scalar(tag, math.sqrt(values[source]), iteration)
+            seconds = int(values["timing/session_elapsed_seconds"])
+            for source in ("episode/return_mean", "episode/length_steps_mean"):
+                if source in values:
+                    self._writer.add_scalar(_SCALAR_GROUPS[source] + "/time", values[source], seconds)
         if force or self._records == 1 or iteration % self.log_interval == 0 or iteration == target:
             print(format_training_log(values, num_envs=self.num_envs, device=self.device), flush=True)
 

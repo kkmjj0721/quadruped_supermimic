@@ -171,8 +171,6 @@ class Go2ReferenceCfg(BaseConfig):
         stiffness = {"hip": 20.0, "thigh": 20.0, "calf": 40.0}
         damping = {"hip": 1.0, "thigh": 1.0, "calf": 2.0}
         effort_limit = {"hip": 23.7, "thigh": 23.7, "calf": 45.43}
-        # 保留旧快照字段；内置位置执行器不使用直流电机的速度限制。
-        velocity_limit = {"hip": 30.1, "thigh": 30.1, "calf": 20.07}
         armature = {"hip": 0.01, "thigh": 0.01, "calf": 0.01}
         action_scales = {"hip": 0.25, "thigh": 0.5, "calf": 0.5}
         decimation = 4
@@ -209,7 +207,6 @@ class Go2ReferenceCfg(BaseConfig):
         outer_flat_width_m = 20.0
         max_init_level = 0
         curriculum = True
-        curriculum_iterations = 12000  # 保留旧配置字段；行走表现课程不使用该值。
         field_resolution_m = 0.02
         field_half_m = 6.5
         field_cache_dir = "logs/heightfields"

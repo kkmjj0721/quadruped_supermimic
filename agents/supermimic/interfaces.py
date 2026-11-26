@@ -6,9 +6,7 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 
 import torch
 from torch import Tensor
@@ -16,7 +14,7 @@ from torch import Tensor
 
 @dataclass(frozen=True)
 class AlgorithmSpec:
-    """维度之外，semantic_id必须标识坐标系、布局、动作及任务语义。"""
+    """描述网络维度及当前任务的静态语义标签。"""
 
     state_dim: int
     delta_dim: int
@@ -30,10 +28,6 @@ class AlgorithmSpec:
     heightmap_dim: int
     history_length: int = 10
     model_id: str = "supermimic_proof_teacher_v2"
-
-    @property
-    def hash(self) -> str:
-        return hashlib.sha256(json.dumps(asdict(self), sort_keys=True).encode()).hexdigest()
 
 
 @dataclass(init=False)

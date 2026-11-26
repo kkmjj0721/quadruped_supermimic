@@ -60,16 +60,6 @@ def _print_help(stream) -> None:
         print(f"  {task}", file=stream)
 
 
-def _validate_config(cfg: PlayConfig) -> None:
-    """在分配仿真资源前检查入口参数。"""
-    for name in ("num_envs", "video_height", "video_width"):
-        value = getattr(cfg, name)
-        if value is not None and value <= 0:
-            raise ValueError(f"{name} must be positive.")
-    if cfg.video and cfg.video_length <= 0:
-        raise ValueError("video_length must be positive when recording video.")
-
-
 def run_viewer(env, policy, cfg: PlayConfig, device: str) -> None:
     """按显示环境选择原生窗口或浏览器查看器，结束后由调用方关闭环境。"""
     viewer = cfg.viewer
@@ -96,7 +86,6 @@ def _resolve_checkpoint(cfg: PlayConfig) -> Path | None:
 
 def run_play(task_id: str, cfg: PlayConfig) -> None:
     """装配 SuperMimic 播放环境和策略，并确保退出时关闭环境。"""
-    _validate_config(cfg)
     checkpoint = _resolve_checkpoint(cfg)
     configure_torch_backends()
     device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")

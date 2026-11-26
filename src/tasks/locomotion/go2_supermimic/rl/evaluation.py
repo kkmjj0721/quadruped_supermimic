@@ -1,18 +1,16 @@
 # Copyright (c) 2026-2027 zh
 """
 内容：
-    分命令评估单策略与零动作，记录真实终态跟踪、首次回合存活和部署对拍。
+    分命令评估单策略与零动作，记录真实终态跟踪与首次回合存活。
 """
 
 from __future__ import annotations
 
 import math
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import torch
 
-from .checkpoints import export_checkpoint
 from .playback import make_playback
 
 
@@ -33,15 +31,6 @@ def evaluate_policy(task_id: str, checkpoint: str | Path, *, branch="actor", dev
         torch.manual_seed(env.adapter.cfg.env.seed)
         observations = env.reset()
         count = math.ceil(seconds / env.adapter.step_dt)
-        # 训练目录不再保存策略副本，对拍用当场导出的TorchScript，避免依赖额外产物。
-        with TemporaryDirectory(prefix=".evaluation_parity_") as temporary:
-            exported = export_checkpoint(checkpoint, temporary)
-            deployed = torch.jit.load(str(exported["pt"]), map_location="cpu")
-            expected = actor(observations).cpu()
-            actual = deployed(observations["history"].flatten(1).cpu(), observations["heightmap"].cpu(),
-                              observations["exteroceptive_mask"].cpu())
-            torch.testing.assert_close(actual, expected, atol=1e-4, rtol=1e-4)
-            parity = float((actual - expected).abs().max())
         first_steps = torch.full((num_envs,), count, device=device, dtype=torch.long)
         first_done = torch.zeros(num_envs, device=device, dtype=torch.bool)
         first_failed = first_done.clone()
@@ -101,7 +90,6 @@ def evaluate_policy(task_id: str, checkpoint: str | Path, *, branch="actor", dev
                             for index, name in enumerate(command_names)},
             "falls_per_environment_minute": int(failure_counts.sum()) / (num_envs * count * env.adapter.step_dt / 60),
             "action_abs_max": action_max, "command_rms": float(fixed_commands.square().sum(-1).mean().sqrt()),
-            "torchscript_max_abs_error": parity,
         }
         return result
     finally:

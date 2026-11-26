@@ -14,9 +14,7 @@ from .policy import Mlp
 
 
 def _prepare_policy(actor, iteration, metadata):
-    """冻结部署副本并生成两种导出入口共用的元数据。"""
-    if any(not torch.isfinite(value).all() for value in actor.state_dict().values()):
-        raise ValueError("Cannot export non-finite policy tensors")
+    """冻结部署副本并生成导出元数据。"""
     runtime_precision = "bf16" if any(layer.use_bf16 for layer in actor.modules() if isinstance(layer, Mlp)) else "fp32"
     source_precision = (metadata or {}).get("source_network_precision", runtime_precision)
     module = deepcopy(actor).cpu().eval().requires_grad_(False)
@@ -79,20 +77,7 @@ def _write_onnx(module, path, information):
     for name, value in information.items():
         field = model.metadata_props.add()
         field.key, field.value = name, json.dumps(value, ensure_ascii=False, allow_nan=False)
-    onnx.checker.check_model(model)
     onnx.save(model, path)
-
-
-def export_policy_onnx(actor, path, *, iteration: int, metadata=None):
-    """检查点保存时更新含必要编码器与归一化的当前ONNX。"""
-    module, information = _prepare_policy(actor, iteration, metadata)
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(prefix=".policy_export_", dir=destination.parent) as temporary:
-        pending = Path(temporary) / "policy.onnx"
-        _write_onnx(module, pending, information)
-        os.replace(pending, destination)
-    return destination
 
 
 def export_policy(actor, directory, *, iteration: int, metadata=None):

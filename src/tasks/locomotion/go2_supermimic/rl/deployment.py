@@ -4,11 +4,11 @@
 from ..mdp.state_spec import JOINT_NAMES
 
 
-def deployment_metadata(cfg, *, spec_hash: str, algorithm) -> dict:
-    """训练保存与离线导出共享同一份观测、地图及动作定义。"""
+def deployment_metadata(cfg, *, algorithm) -> dict:
+    """从任务配置生成离线部署所需的观测、地图及动作定义。"""
     control = cfg.control
     return {
-        "spec_hash": spec_hash, "algorithm": "supermimic_proof_teacher",
+        "algorithm": "supermimic_proof_teacher",
         "inference_action": "deterministic_mean",
         "observation_dim": 45, "history_length": cfg.env.num_obs_history,
         "observation_layout": [

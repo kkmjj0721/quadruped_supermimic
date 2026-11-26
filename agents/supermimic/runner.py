@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from collections import defaultdict
 from dataclasses import asdict
 import json
 import os
@@ -234,8 +235,8 @@ class SuperMimicRunner:
         if self.current is None:
             self.reset_collection()
         cfg = self.config
-        totals = {}
-        metric_counts = {}
+        totals = defaultdict(int)
+        metric_counts = defaultdict(int)
         reward_sum = torch.zeros((), device=self.device)
         failure_count = torch.zeros((), device=self.device)
         timeout_count = torch.zeros((), device=self.device)
@@ -263,8 +264,8 @@ class SuperMimicRunner:
             failure_count += result.terminated.sum()
             timeout_count += (result.truncated & ~result.terminated).sum()
             for name, value in self._collection_step_metrics().items():
-                totals[name] = totals.get(name, 0) + value
-                metric_counts[name] = metric_counts.get(name, 0) + 1
+                totals[name] += value
+                metric_counts[name] += 1
             self.real_steps += self.env.num_envs
         # 回合指标只在结束步出现，按实际出现次数平均，与RSL-RL一致。
         metrics = {name: value / metric_counts[name] for name, value in totals.items()}
@@ -494,7 +495,7 @@ class SuperMimicRunner:
 
     def _checkpoint_state(self):
         """统一装配算法状态，任务子类在写盘前追加自己的元数据。"""
-        return {"format": self.spec.model_id, "spec": asdict(self.spec), "spec_hash": self.spec.hash,
+        return {"format": self.spec.model_id, "spec": asdict(self.spec),
                 "config": asdict(self.config), "execution": asdict(self.execution), "control_enabled": self.control_enabled,
                 "actor": self.actor.state_dict(), "critic": self.critic.state_dict(), "world_model": self.model.state_dict(),
                 "learner": self.learner.state_dict(), "iteration": self.iteration, "real_steps": self.real_steps,

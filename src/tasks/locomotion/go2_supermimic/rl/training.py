@@ -12,7 +12,6 @@ from importlib.metadata import version
 import json
 import os
 from pathlib import Path
-import subprocess
 import sys
 import time
 
@@ -54,28 +53,21 @@ def _resolve_task_config(task_id: str, args: SuperMimicTrainConfig):
 # ---------- 运行快照与训练装配 ----------
 
 def _run_origin(task_id: str, args: SuperMimicTrainConfig, device: str, resume: Path | None, source: Path | None) -> dict:
-    """收集命令、依赖版本与代码状态，供事件文本和params快照共同使用。"""
-    root = Path(__file__).resolve().parents[5]
-    workspace = {}
-    for name, command in (("revision", ["git", "rev-parse", "HEAD"]),
-                          ("status", ["git", "status", "--short"]),
-                          ("diff", ["git", "diff", "HEAD", "--"])):
-        try:
-            result = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=10, check=False)
-            workspace[name] = (result.stdout if name == "diff" else result.stdout.strip()) if result.returncode == 0 else None
-        except (OSError, subprocess.TimeoutExpired):
-            workspace[name] = None
+    """收集命令与依赖版本，路径在序列化边界显式转为字符串。"""
+    arguments = asdict(args)
+    for name in ("resume", "task_config"):
+        value = arguments[name]
+        arguments[name] = str(value) if value is not None else None
     return {"task_id": task_id, "started_at": datetime.now().astimezone().isoformat(),
-            "arguments": asdict(args), "device": device, "resume_from": resume,
-            "task_config_source": source, "command": list(sys.argv), "python": sys.version,
-            "torch": torch.__version__,
+            "arguments": arguments, "device": device, "resume_from": str(resume) if resume is not None else None,
+            "task_config_source": str(source) if source is not None else None,
+            "command": list(sys.argv), "python": sys.version, "torch": str(torch.__version__),
             "triton_libdevice_path": os.environ.get("TRITON_LIBDEVICE_PATH"),
-            "packages": {name: version(name) for name in ("mjlab", "mujoco", "mujoco-warp", "warp-lang", "tensorboard")},
-            "workspace": workspace}
+            "packages": {name: version(name) for name in ("mjlab", "mujoco", "mujoco-warp", "warp-lang", "tensorboard")}}
 
 
 def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
-    """调用既有runner训练至目标轮次，周期保存模型和ONNX并返回独立产物目录。"""
+    """调用既有runner训练至目标轮次，周期保存检查点并返回独立产物目录。"""
     entry_started = time.perf_counter()
     cfg, resume, source = _resolve_task_config(task_id, args)
     runtime = cfg.runner
@@ -109,14 +101,10 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
               f"wm_bf16={execution.wm_bf16}, actor_bf16={execution.actor_bf16}, critic_bf16={execution.critic_bf16}, "
               f"timing_interval={execution.timing_interval}, metric_interval={execution.metric_interval}", flush=True)
         # 快照反映JSON与CLI覆盖后的实际配置，普通YAML类型便于直接查看和安全回读。
-        origin = json.loads(json.dumps(_run_origin(task_id, args, device, resume, source), default=str))
+        origin = _run_origin(task_id, args, device, resume, source)
         origin.update(seed=cfg.env.seed, num_envs=cfg.env.num_envs)
         params = log_dir / "params"
         params.mkdir()
-        diff = origin["workspace"].pop("diff")
-        origin["workspace"]["diff_file"] = "params/git.diff" if diff is not None else None
-        if diff is not None:
-            (params / "git.diff").write_text(diff, encoding="utf-8")
         settings = cfg.to_dict()
         agent = {"algorithm": settings.pop("algorithm"), "config": asdict(algorithm_config(cfg)),
                  "execution": asdict(execution), "runner": settings.pop("runner")}
@@ -146,7 +134,7 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
                 runner.learn(min(remaining, until_checkpoint))
             finally:
                 timing.record_wall("learn_blocks", time.perf_counter() - learn_started)
-            # 参考在塌缩护栏首次预警时跳过该保存点，不发布可疑策略及其ONNX。
+            # 参考在塌缩护栏首次预警时跳过该保存点。
             if runner._collapse_strikes == 0:
                 checkpoint = log_dir / f"model_{runner.iteration}.pt"
                 runner.save(checkpoint)
@@ -178,7 +166,7 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
     summary["scope"].update({
         "entry_total": "launch_training entry through logger/environment close and final target-device synchronization; excludes this summary write",
         "learn_blocks": "Inclusive host wall of runner.learn calls; includes prefill, setup and per-iteration logging, excludes outer checkpoint save",
-        "save_total": "Inclusive parent of checkpoint_prepare, onnx_export, checkpoint_publish and temporary-directory cleanup; do not sum parent and children",
+        "save_total": "Checkpoint serialization and one temporary-file replacement",
         "process_wall": "Not measured here; the explicit training test launcher measures child-process wall externally",
         "transitions": "New steps subtract restored counters; entry_real_transitions_per_second includes prefill, entry_training_transitions_per_second excludes it",
     })

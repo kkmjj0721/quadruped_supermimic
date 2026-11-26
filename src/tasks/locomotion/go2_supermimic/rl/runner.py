@@ -2,23 +2,19 @@
 """内容：装配 Go2 SuperMimic 训练器，持久化课程与任务配置快照。"""
 
 from contextlib import contextmanager
-from dataclasses import asdict, fields
+from dataclasses import fields
 import json
-import os
 from pathlib import Path
-from tempfile import TemporaryDirectory
 import time
 
 import torch
 
-from agents.supermimic.config import ExecutionConfig, SuperMimicConfig
-from agents.supermimic.export import export_policy_onnx
+from agents.supermimic.config import ExecutionConfig
 from agents.supermimic.runner import SuperMimicRunner
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 
 from ..config.loading import algorithm_config
 from .transition_adapter import make_go2_supermimic_env
-from .deployment import deployment_metadata
 from .world_model import Go2WorldModel
 
 
@@ -113,32 +109,15 @@ class Go2SuperMimicRunner(SuperMimicRunner):
 
     def _checkpoint_state(self):
         checkpoint = super()._checkpoint_state()
-        checkpoint["go2_task"] = {"spec_hash": self.spec.hash, "curriculum": self.env.curriculum_state_dict()}
+        checkpoint["go2_task"] = {"curriculum": self.env.curriculum_state_dict()}
         return checkpoint
 
     def save(self, path):
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # 先完成两种产物的生成与校验，再发布；导出失败不覆盖上次可用模型和ONNX。
-        with _save_timing(self.timing, "save_total"), TemporaryDirectory(prefix=".checkpoint_", dir=path.parent) as temporary:
-            temporary = Path(temporary)
-            pending = temporary / path.name
-            with _save_timing(self.timing, "checkpoint_prepare"):
-                super().save(pending)
-            with _save_timing(self.timing, "onnx_export"):
-                export_policy_onnx(self.actor, temporary / "policy.onnx", iteration=self.iteration,
-                                   metadata=deployment_metadata(self.env.cfg, spec_hash=self.spec.hash,
-                                                                algorithm=self.config))
-            with _save_timing(self.timing, "checkpoint_publish"):
-                os.replace(pending, path)
-                os.replace(temporary / "policy.onnx", path.parent / "policy.onnx")
+        with _save_timing(self.timing, "save_total"):
+            super().save(path)
 
     def load(self, path, *, continue_run=False, reset_critic=False):
         checkpoint = super().load(path, continue_run=continue_run, reset_critic=reset_critic)
-        task_state = checkpoint["go2_task"]
-        if continue_run and (checkpoint["spec"] != asdict(self.spec)
-                             or task_state["spec_hash"] != self.spec.hash):
-            raise ValueError("Go2 task or dynamics changed; use an explicit warm start instead of continue_run")
         if continue_run:
             self.env.resume_progress(self.iteration)
         return checkpoint
@@ -164,8 +143,7 @@ def make_go2_supermimic_runner(cfg=None, *, device="cpu", log_dir=None, executio
             from .driver import ActorDriver
             runner.expert = ActorDriver(cfg.runner.driver.expert_policy, runner.device)
         if log_dir is not None:
-            snapshot = {"config": env.cfg.to_dict(), "spec_hash": env.task.spec.hash,
-                        "geometry_hash": env.surface.geometry_hash}
+            snapshot = {"config": env.cfg.to_dict()}
             destination = Path(log_dir)
             destination.mkdir(parents=True, exist_ok=True)
             (destination / "task_config.json").write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")

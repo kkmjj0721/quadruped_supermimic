@@ -71,21 +71,13 @@ class ModelMetrics:
 
     @torch.no_grad()
     def add(self, metrics):
-        device_values = {}
-        for name, value in metrics.items():
-            if isinstance(value, torch.Tensor):
-                device_values[name] = value.detach()
-                if name not in self.totals:
-                    # 保持0+value的类型推广，包括bool到int64。
-                    self.totals[name] = torch.zeros_like(value, dtype=torch.result_type(value, 0))
-            else:
-                if name not in self.totals:
-                    self.totals[name] = 0
-                self.totals[name] += value
-        if device_values:
-            names = tuple(device_values)
-            totals = self._accumulate(tuple(device_values.values()), tuple(self.totals[name] for name in names))
-            self.totals.update(zip(names, totals))
+        values = tuple(value.detach() for value in metrics.values())
+        if not self.totals:
+            # 世界模型更新固定返回设备标量，首轮只建立同类型累计槽。
+            self.totals = {name: torch.zeros_like(value, dtype=torch.result_type(value, 0))
+                           for name, value in metrics.items()}
+        totals = self._accumulate(values, tuple(self.totals[name] for name in metrics))
+        self.totals.update(zip(metrics, totals))
 
     def mean(self, updates):
         return {name: value / updates for name, value in self.totals.items()}
@@ -121,6 +113,7 @@ class MetricWindow:
 
     可选编译固定布局的打包与累计核心，主机字典和跨轮调度不进入图。
     最近100回合等快照取末轮；缺省和空回合窗口不进入均值分母。
+    迭代号与控制步数是主机整数；有效掩码只用于设备列。
     同名指标在窗口中固定使用主机数值或同一设备张量，沿用训练循环的来源约定。
     """
 
@@ -170,9 +163,7 @@ class MetricWindow:
         steps = metrics["collection/control_steps"]
         validity = validity if validity is not None else {}
         self.iterations += 1
-        if isinstance(iteration, torch.Tensor):
-            iteration = iteration.detach().clone()
-        if self.start_iteration is None:
+        if self.iterations == 1:
             self.start_iteration = iteration
         self.end_iteration = iteration
         device_values = {}
@@ -183,21 +174,13 @@ class MetricWindow:
             if isinstance(value, torch.Tensor):
                 device_values[name] = value.detach().reshape(())
                 continue
-            valid = validity.get(name, True)
             mode = _metric_reduction(name)
-            if isinstance(valid, torch.Tensor) or mode == "weighted" and isinstance(steps, torch.Tensor):
-                device_values[name] = torch.as_tensor(value, device=self.device).detach().reshape(())
-                continue
             weight = steps if mode == "weighted" else 1
-            if not valid:
-                if mode == "last":
-                    self._host.pop(name, None)
-                continue
-            previous, denominator = self._host.get(name, (0, 0))
-            if mode == "last":
-                self._host[name] = (value, 1)
-            else:
-                self._host[name] = (previous + value * weight, denominator + weight)
+            if name not in self._host:
+                self._host[name] = (0, 0)
+            previous, denominator = self._host[name]
+            self._host[name] = ((value, 1) if mode == "last"
+                                else (previous + value * weight, denominator + weight))
 
         new_names = [name for name in device_values if name not in self._zeros]
         if new_names:
@@ -207,16 +190,13 @@ class MetricWindow:
             return
         values, masks = [], []
         for name in self._names:
-            # 缺省值沿用该列的形状和dtype，缺省模式变化不会触发布局重编译。
-            values.append(device_values.get(name, self._zeros[name]))
-            valid = validity.get(name, True) if name in device_values else False
-            masks.append(valid.detach().reshape(()) if isinstance(valid, torch.Tensor)
-                         else self._mask_defaults[name][bool(valid)])
+            # 暖机、冻结和回合事件允许列缺席；固定槽维持编译布局。
+            present = name in device_values
+            values.append(device_values[name] if present else self._zeros[name])
+            masks.append(validity[name].detach().reshape(()) if present and name in validity
+                         else self._mask_defaults[name][present])
         # 2/3步交替只更新设备值，避免Python步数参与编译值特化。
-        if isinstance(steps, torch.Tensor):
-            self._steps.copy_(steps)
-        else:
-            self._steps.fill_(steps)
+        self._steps.fill_(steps)
         self._accumulate(tuple(values), tuple(masks), self._totals, self._counts,
                          self._last, self._weighted, self._steps)
 
@@ -247,11 +227,11 @@ def read_metrics(metrics, device, *, validity=None):
     tensor_names = [name for name, value in metrics.items() if isinstance(value, torch.Tensor)]
     mask_names = list(validity)
     packed = [metrics[name].detach().to(device=device, dtype=torch.float64).reshape(()) for name in tensor_names]
-    packed.extend(torch.as_tensor(validity[name], device=device, dtype=torch.float64).reshape(()) for name in mask_names)
+    packed.extend(validity[name].detach().to(device=device, dtype=torch.float64).reshape(()) for name in mask_names)
     values = torch.stack(packed).cpu().tolist() if packed else []
-    result = {name: float(value) for name, value in metrics.items() if name not in tensor_names}
+    result = {name: value for name, value in metrics.items() if name not in tensor_names}
     result.update(zip(tensor_names, values[:len(tensor_names)]))
     for name, valid in zip(mask_names, values[len(tensor_names):]):
         if not valid:
-            result.pop(name, None)
+            del result[name]
     return result

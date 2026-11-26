@@ -39,17 +39,16 @@ uv run --no-sync python scripts/play.py Unitree-Go2-SuperMimic-Rough \
 
 训练保留编译、CUDA Graph、BF16、Muon＋Adam、想象／critic微批、frames压缩回放和设备指标汇总。相关CLI参数仍为`--wm-compile`、`--cuda-graph`、`--wm-bf16`、`--actor-bf16`、`--critic-bf16`、`--imag-microbatch`、`--critic-microbatch`、`--replay-history-storage`与`--metric-interval`。CPU执行时显式关闭三个BF16开关。完整参数通过入口`--help`查看。
 
-`--task-config`加载当前教师配置；`--resume`默认热启动，`--continue-run True`接续迭代号。检查点与同目录`task_config.json`共同描述任务。当前格式为`supermimic_proof_teacher_v2`，状态151维，旧v1教师与MoE检查点均不兼容；不提供字段或权重兼容迁移。本轮事件与站姿版本需重新训练。
+`--task-config`加载当前教师配置；`--resume`默认热启动，`--continue-run True`接续迭代号。检查点与同目录`task_config.json`共同描述任务；加载不再比较配置全量快照或任务哈希，权重仍严格加载。旧快照中的`control.velocity_limit`和`terrain.curriculum_iterations`已删除，加载前须移除这两个无效字段。当前格式为`supermimic_proof_teacher_v2`，状态151维，旧v1教师与MoE检查点均不兼容；不提供字段或权重兼容迁移。本轮事件与站姿版本需重新训练。
 
 任务名称沿用`Unitree-Go2-SuperMimic-Flat/Rough`。当前Go2资产、关节顺序、PD、动作尺度、物理随机化、命令采样和地形课程沿用本项目；因此不声称与作者IsaacLab／PhysX轨迹等价。
 
 ## 策略导出
 
-保存检查点时生成三输入`policy.onnx`。显式离线导出：
+训练仅保存`.pt`检查点；播放与评估不导出部署文件。需要部署时单独导出：
 
-```python
-from src.tasks.locomotion.go2_supermimic.rl.checkpoints import export_checkpoint
-export_checkpoint("<实验目录>/model_1000.pt", "<导出目录>")
+```bash
+.venv/bin/python scripts/export.py <实验目录>/model_1000.pt <导出目录>
 ```
 
 TorchScript与ONNX均接收`obs_history[B,450]`、`heightmap[B,162]`和`exteroceptive_mask[B,1]`，输出未缩放动作`actions[B,12]`；关节目标为`default_joint_positions+actions*action_scales`。导出为FP32，并保存原训练精度、历史布局、地图及控制坐标等元数据，格式为`supermimic_proof_teacher_policy_v1`。播放和评估使用同一套输入构造。

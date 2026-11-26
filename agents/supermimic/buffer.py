@@ -216,8 +216,6 @@ class WindowArchive:
     def add(self, windows: Window, keep: Tensor | None = None):
         candidates = windows.actions.shape[0]
         device = windows.actions.device
-        if candidates == 0 or self.capacity == 0:
-            return
         if self.storage is None:
             self._allocate(windows.initial.data, windows.actions, windows.actions.shape[1], windows.initial.widths)
         keep = torch.ones(candidates, dtype=torch.bool, device=device) if keep is None else keep
@@ -233,8 +231,6 @@ class WindowArchive:
     @torch.no_grad()
     def add_from_replay(self, replay: Replay, rows: Tensor, starts: Tensor, horizon: int, valid: Tensor, keep: Tensor):
         """在精确keep掩码下直接从TE回放入库，不构造全部候选完整窗口。"""
-        if rows.numel() == 0 or self.capacity == 0:
-            return
         if self.storage is None:
             self._allocate(replay.states.data, replay.actions, horizon, replay.states.widths)
         accepted, indices = self._accepted_indices(keep)
