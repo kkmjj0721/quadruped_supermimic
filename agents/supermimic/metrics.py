@@ -145,8 +145,24 @@ class MetricWindow:
         self.iterations = 0
         self.start_iteration = self.end_iteration = None
         self._host = {}
+        self._observed = set()
         self._totals.zero_()
         self._counts.zero_()
+
+    def register_columns(self, columns):
+        """一次登记设备列及类型；本窗口未出现的列只保留无效槽，不进入输出。"""
+        names = tuple(columns)
+        self._names.extend(names)
+        self._zeros.update((name, torch.zeros_like(value)) for name, value in columns.items())
+        # 每列对象独立，缺省切换不改变编译输入的对象别名关系。
+        self._mask_defaults.update((name, (self._false.view(()), self._true.view(()))) for name in names)
+        padding = self._totals.new_zeros(len(names))
+        self._totals = torch.cat((self._totals, padding))
+        self._counts = torch.cat((self._counts, padding))
+        modes = [_metric_reduction(name) for name in self._names]
+        self._last = torch.tensor([mode == "last" for mode in modes], device=self.device)
+        self._mean = torch.tensor([mode in {"mean", "weighted"} for mode in modes], device=self.device)
+        self._weighted = torch.tensor([mode == "weighted" for mode in modes], device=self.device)
 
     @torch.no_grad()
     def add(self, metrics, *, validity=None):
@@ -185,17 +201,8 @@ class MetricWindow:
 
         new_names = [name for name in device_values if name not in self._zeros]
         if new_names:
-            self._names.extend(new_names)
-            self._zeros.update((name, torch.zeros_like(device_values[name])) for name in new_names)
-            # 每列视图仅建立一次；对象独立以保持编译输入别名约定，底层标志只读共享。
-            self._mask_defaults.update((name, (self._false.view(()), self._true.view(()))) for name in new_names)
-            padding = self._totals.new_zeros(len(new_names))
-            self._totals = torch.cat((self._totals, padding))
-            self._counts = torch.cat((self._counts, padding))
-            modes = [_metric_reduction(name) for name in self._names]
-            self._last = torch.tensor([mode == "last" for mode in modes], device=self.device)
-            self._mean = torch.tensor([mode in {"mean", "weighted"} for mode in modes], device=self.device)
-            self._weighted = torch.tensor([mode == "weighted" for mode in modes], device=self.device)
+            self.register_columns({name: device_values[name] for name in new_names})
+        self._observed.update(device_values)
         if not self._names:
             return
         values, masks = [], []
@@ -224,8 +231,10 @@ class MetricWindow:
             means = self._totals / self._counts.clamp_min(1)
             values = torch.where(self._mean, means, self._totals)
             valid = self._counts > 0
-            metrics.update(zip(self._names, values.unbind()))
-            validity.update(zip(self._names, valid.unbind()))
+            for name, value, mask in zip(self._names, values.unbind(), valid.unbind(), strict=True):
+                if name in self._observed:
+                    metrics[name] = value
+                    validity[name] = mask
         metrics.update({"metrics/window_start_iteration": self.start_iteration,
                         "metrics/window_end_iteration": self.end_iteration,
                         "metrics/window_iterations": self.iterations})

@@ -60,6 +60,18 @@ class Go2SuperMimicRunner(SuperMimicRunner):
             metrics.update(self._driver_metrics)
         return metrics
 
+    def _metric_columns(self):
+        """覆盖全部奖励与回合奖励列，保留课程迭代号和驱动计数的主机类型。"""
+        columns = super()._metric_columns()
+        scalar = torch.zeros((), device=self.device)
+        for name in self.task.reward_scales:
+            for prefix in ("task/reward_raw/", "task/reward/", "Reward_Rate/", "Episode_Reward/"):
+                columns[prefix + name] = scalar
+        columns.update(("task/" + name, scalar) for name in (
+            "terrain_level", "tracking_linear_mse", "tracking_angular_mse", "action_rms",
+            "exteroceptive_fraction", "base_height", "fast_yaw"))
+        return columns
+
     def _override_actions(self, action, history, observation):
         """按参考实现从环境尾部切出专家与驱动区，其余环境保留当前策略动作。
 

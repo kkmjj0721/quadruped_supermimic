@@ -54,16 +54,14 @@ class Go2Kinematics(nn.Module):
         self.register_buffer("site_offsets", torch.tensor(model.site_pos[sites].copy(), dtype=torch.float32, device=device))
 
     def foot_yaw(self, rotation, joints):
-        """按同一关节树恢复各足所属刚体的yaw，供PROOF四射线足高使用。"""
-        rotations = [None] * self.num_bodies
-        for index in range(self.num_bodies):
-            parent = self.parents[index]
-            if parent < 0:
-                rotations[index] = rotation
-            else:
-                offset = mm3(rotations[parent], self.rotations[index])
-                rotations[index] = mm3(offset, axis_angle_to_mat(self.axes[index], joints[..., self.joints[index]]))
-        feet = torch.stack([rotations[parent] for parent in self.site_parents], -3)
+        """四腿按三级链并行恢复calf航向，各腿仍使用各自MJCF常量。"""
+        axes = self.axes[1:].reshape(4, 3, 3)
+        rotations = self.rotations[1:].reshape(4, 3, 3, 3)
+        angles = joints.reshape(joints.shape[:-1] + (4, 3))
+        feet = rotation.unsqueeze(-3)
+        for level in range(3):
+            offset = mm3(feet, rotations[:, level])
+            feet = mm3(offset, axis_angle_to_mat(axes[:, level], angles[..., level]))
         return torch.atan2(feet[..., 1, 0], feet[..., 0, 0])
 
     def forward(self, p, R, v, w, q, qd):
@@ -72,24 +70,25 @@ class Go2Kinematics(nn.Module):
         p/R/v/w 是根部世界位置、旋转、线速度与角速度；q/qd 为 JOINT_NAMES
         顺序的真实关节角和速度。几何 buffer 与输入应在同一设备和精度。
         """
-        positions, rotations, velocities, angular = ([None] * self.num_bodies for _ in range(4))
-        for index in range(self.num_bodies):
-            parent = self.parents[index]
-            if parent < 0:
-                positions[index], rotations[index], velocities[index], angular[index] = p, R, v, w
-                continue
-            joint = self.joints[index]
-            displacement = mv3(rotations[parent], self.offsets[index])
-            position = positions[parent] + displacement
-            rotation_offset = mm3(rotations[parent], self.rotations[index])
-            rotation = mm3(rotation_offset, axis_angle_to_mat(self.axes[index], q[..., joint]))
-            omega = angular[parent] + mv3(rotation_offset, self.axes[index]) * qd[..., joint:joint + 1]
-            velocity = velocities[parent] + torch.cross(angular[parent], displacement, dim=-1)
-            positions[index], rotations[index], velocities[index], angular[index] = position, rotation, velocity, omega
-        feet, foot_velocities = [], []
-        for index, parent in enumerate(self.site_parents):
-            displacement = mv3(rotations[parent], self.site_offsets[index])
-            feet.append(positions[parent] + displacement)
-            foot_velocities.append(velocities[parent] + torch.cross(angular[parent], displacement, dim=-1))
-        limbs = [positions[index] for index in self.limb_indices] + feet
-        return torch.stack(limbs, -2), torch.stack(foot_velocities, -2)
+        axes = self.axes[1:].reshape(4, 3, 3)
+        offsets = self.offsets[1:].reshape(4, 3, 3)
+        rotations = self.rotations[1:].reshape(4, 3, 3, 3)
+        angles = q.reshape(q.shape[:-1] + (4, 3))
+        rates = qd.reshape(qd.shape[:-1] + (4, 3))
+        position, rotation = p.unsqueeze(-2), R.unsqueeze(-3)
+        velocity, angular = v.unsqueeze(-2), w.unsqueeze(-2)
+        limbs = []
+        for level in range(3):
+            displacement = mv3(rotation, offsets[:, level])
+            position = position + displacement
+            rotation_offset = mm3(rotation, rotations[:, level])
+            rotation = mm3(rotation_offset, axis_angle_to_mat(axes[:, level], angles[..., level]))
+            omega = angular + mv3(rotation_offset, axes[:, level]) * rates[..., level, None]
+            velocity = velocity + torch.cross(angular, displacement, dim=-1)
+            angular = omega
+            if level > 0:
+                limbs.append(position)
+        displacement = mv3(rotation, self.site_offsets)
+        feet = position + displacement
+        foot_velocities = velocity + torch.cross(angular, displacement, dim=-1)
+        return torch.cat((*limbs, feet), dim=-2), foot_velocities

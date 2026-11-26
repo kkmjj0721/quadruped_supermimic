@@ -20,3 +20,8 @@
 Go2资产、执行器PD、动作尺度、物理随机化、命令采样、行走表现课程及SuperMimic训练预算沿用本项目。参考实现为IsaacLab3／PhysX，本项目为MjLab1.6／MuJoCo；不将代码对拍或短时训练当作作者性能复现或真机验证。原资产与FK来源说明、`LICENSE_blinkmimic`保持原归属。
 
 算法、加速与第三方许可见 [算法来源说明](../../../../agents/supermimic/NOTICE.md)，配置、运行与三输入导出接口见 [算法与任务说明](../../../../agents/README.md)。
+
+
+## 手动重置采集步适配
+
+`rl/mjlab_step.py` 根据 MjLab 1.6.0 的 `mjlab/envs/manager_based_rl_env.py::ManagerBasedRlEnv.step` 改写，仅调整由 adapter 完成手动重置时的 pending 索引处理；物理与 manager 顺序保留。来源：https://github.com/mujocolab/mjlab 。上游 Apache-2.0 许可副本见 `rl/LICENSE_mjlab`。此适配用于本任务的手动重置采集路径，未修改安装包。

@@ -9,6 +9,7 @@ import math
 import torch
 from torch import Tensor
 
+from agents.supermimic.compilation import compile_kernel
 from agents.supermimic.config import RUNNER_RUNTIME_FIELDS
 from agents.supermimic.interfaces import AlgorithmSpec, TaskState
 
@@ -49,6 +50,7 @@ class Go2ReferenceTaskModel:
         self.reward_scales = cfg.to_dict()["reward"]["scales"]
         self.dynamics = ResidualDynamics(self.dt, cfg.control.decimation)
         self.kinematics = Go2Kinematics(device=self.device)
+        self._read_physical_kernel = self._read_physical_tensors
         # PROOF ae910b8：18×9，yaw对齐，中心前移0.6米。
         size_x, size_y = cfg.terrain.scan_size_m
         resolution = cfg.terrain.scan_resolution_m
@@ -59,6 +61,9 @@ class Go2ReferenceTaskModel:
         foot_axis = torch.tensor((-.015, .015), device=self.device)
         self.foot_scan_points = torch.stack(torch.meshgrid(foot_axis, foot_axis, indexing="ij"), -1).reshape(-1, 2)
         self.heightmap_dim = self.scan_points.shape[0]
+        self.replay_feature_indices = torch.tensor(
+            (HEIGHT.start, *range(FEET.start, FEET.stop), VELOCITY_HEADING.start + 2),
+            dtype=torch.long, device=self.device)
         self.model_input_dim = PHYSICAL_DIM - 3 + 12 + 12 + 16 + self.heightmap_dim
         noise = cfg.noise.noise_scales
         self.noise_amplitude = self.default_joint_pos.new_tensor(
@@ -111,35 +116,54 @@ class Go2ReferenceTaskModel:
         self.actuator_gain = torch.tensor(model.actuator_gainprm[ids, 0].copy(), dtype=torch.float32, device=self.device)
         self.actuator_bias = torch.tensor(model.actuator_biasprm[ids, :3].copy(), dtype=torch.float32, device=self.device)
 
+    def configure_collection_compile(self, *, enabled, backend):
+        """只编译纯张量快照核，MjLab惰性属性和步号在eager边界解析。"""
+        self._read_physical_kernel = (compile_kernel(self._read_physical_tensors, backend)
+                                      if enabled else self._read_physical_tensors)
+
     def read_physical(self, env) -> Tensor:
+        """按当前仿真时序读取惰性数据，显式传递快照所需张量。"""
         data = env.scene["robot"].data
         sensor = env.scene["feet_ground_contact"].data
         position, yaw = data.root_link_pos_w, data.heading_w
-        limbs = (data.body_link_pos_w[:, self.hip_ids], data.body_link_pos_w[:, self.knee_ids],
-                 data.site_pos_w[:, self.foot_ids])
+        body_position, site_position = data.body_link_pos_w, data.site_pos_w
+        calf_history = env.scene["calf_ground_contact"].data.force_history
+        base_history = env.scene["base_ground_contact"].data.force_history
+        sim = env.sim.data
+        return self._read_physical_kernel(
+            position, yaw, body_position, site_position,
+            data.projected_gravity_b, data.root_link_lin_vel_w, data.root_link_ang_vel_b,
+            data.joint_pos, data.default_joint_pos, data.joint_vel, data.joint_acc, data.site_lin_vel_w,
+            sensor.found, sensor.force, sensor.force_history, data.actuator_force,
+            calf_history, base_history, sim.ctrl[:], sim.actuator_length[:], sim.actuator_velocity[:],
+            data.root_link_quat_w)
+
+    def _read_physical_tensors(self, position, yaw, body_position, site_position, gravity,
+                               linear_velocity, angular_velocity, joint_position, default_joint,
+                               joint_velocity, joint_acceleration, site_velocity, found, foot_force,
+                               foot_history, actuator_force, calf_history, base_history, control,
+                               actuator_length, actuator_velocity, quaternion) -> Tensor:
+        """纯张量坐标变换与拼接，输出独立于仿真存储的物理状态。"""
+        limbs = (body_position[:, self.hip_ids], body_position[:, self.knee_ids], site_position[:, self.foot_ids])
         relative = [yaw_rotate_inverse(points - position[:, None], yaw[:, None]).flatten(1) for points in limbs]
         height = position[:, 2:3] - self.surface_height(position[:, :2]).unsqueeze(-1)
-        calf_history = env.scene["calf_ground_contact"].data.force_history
         calf_net = calf_history[:, self.calf_geom_ids].sum(dim=2)
         calf_force = calf_net.norm(dim=-1).amax(dim=2)
-        base_force = env.scene["base_ground_contact"].data.force_history.norm(dim=-1).amax(dim=(1, 2))[:, None]
-        sim = env.sim.data
-        computed_torque = (self.actuator_gain * sim.ctrl[:, self.actuator_ids]
-                           + self.actuator_bias[:, 0] + self.actuator_bias[:, 1] * sim.actuator_length[:, self.actuator_ids]
-                           + self.actuator_bias[:, 2] * sim.actuator_velocity[:, self.actuator_ids])
-        history_contact = (sensor.force_history.norm(dim=-1).amax(dim=2) > self.cfg.reward.contact_force_threshold).float()
-        # 当前primary足端／secondary地面配置返回对地反作用力，取反后才是PROOF的机器人受力。
-        foot_force = -sensor.force
-        # 标签只在真实传感器边界按官方定义生成，想象不对回归接触力重复做阈值判定。
+        base_force = base_history.norm(dim=-1).amax(dim=(1, 2))[:, None]
+        computed_torque = (self.actuator_gain * control[:, self.actuator_ids]
+                           + self.actuator_bias[:, 0] + self.actuator_bias[:, 1] * actuator_length[:, self.actuator_ids]
+                           + self.actuator_bias[:, 2] * actuator_velocity[:, self.actuator_ids])
+        history_contact = (foot_history.norm(dim=-1).amax(dim=2) > self.cfg.reward.contact_force_threshold).float()
+        # 真实传感器返回地面受力，转为机器人受力；事件仍在此物理边界生成。
+        foot_force = -foot_force
         stumble = (foot_force[..., :2].norm(dim=-1)
                    > self.cfg.reward.stumble_ratio * foot_force[..., 2].abs()).any(-1, keepdim=True).float()
         calf_contact = (calf_force > self.cfg.reward.contact_force_threshold).float()
-        return torch.cat((height, data.projected_gravity_b, yaw_rotate_inverse(data.root_link_lin_vel_w, yaw),
-                          data.root_link_ang_vel_b, data.joint_pos - data.default_joint_pos, data.joint_vel, *relative,
-                          position[:, :2], yaw[:, None], data.joint_acc,
-                          data.site_lin_vel_w[:, self.foot_ids, :2].flatten(1), (sensor.found > 0).float(),
-                          foot_force.flatten(1), data.actuator_force, calf_force, base_force, computed_torque,
-                          history_contact, stumble, calf_contact, data.root_link_quat_w), -1)
+        return torch.cat((height, gravity, yaw_rotate_inverse(linear_velocity, yaw), angular_velocity,
+                          joint_position - default_joint, joint_velocity, *relative, position[:, :2], yaw[:, None],
+                          joint_acceleration, site_velocity[:, self.foot_ids, :2].flatten(1), (found > 0).float(),
+                          foot_force.flatten(1), actuator_force, calf_force, base_force, computed_torque,
+                          history_contact, stumble, calf_contact, quaternion), -1)
 
     def world_position(self, state: TaskState) -> Tensor:
         xy = state.physical[:, POSE][:, :2]
@@ -180,8 +204,12 @@ class Go2ReferenceTaskModel:
                           state.context[:, CONTEXT_ENCODER_BIAS]), -1)
 
     def model_input(self, state: TaskState, action: Tensor) -> Tensor:
+        return self.model_input_from_heightmap(state, action, self.actor_heightmap(state))
+
+    def model_input_from_heightmap(self, state: TaskState, action: Tensor, heightmap: Tensor) -> Tensor:
+        """复用调用方在同一状态上计算的高程，保持原输入拼接顺序。"""
         return torch.cat((self.physical_features(state), action, state.memory[:, PREVIOUS_ACTION],
-                          self.simulation_context(state), self.actor_heightmap(state)), -1)
+                          self.simulation_context(state), heightmap), -1)
 
     def supervised_model_input(self, state: TaskState, action: Tensor, recorded: TaskState) -> Tensor:
         """保留原监督协议：记录pose处的起伏半精度舍入，加预测机身高度。"""
@@ -191,6 +219,10 @@ class Go2ReferenceTaskModel:
                           self.simulation_context(state), scan), -1)
 
     def privileged(self, state: TaskState) -> Tensor:
+        return self.privileged_from_heightmap(state, self.actor_heightmap(state))
+
+    def privileged_from_heightmap(self, state: TaskState, heightmap: Tensor) -> Tensor:
+        """复用高程数值，价值支路仍只保留机身高度导数。"""
         physical = state.physical
         memory = state.memory
         flags = (physical[:, FOOT_CONTACT_FORCE].reshape(-1, 4, 3) > 1.).any(-1).float() - .5
@@ -201,7 +233,7 @@ class Go2ReferenceTaskModel:
                               state.memory[:, PREVIOUS_ACTION].clamp(-10., 10.), flags,
                               self.feet_height(physical).clamp(-10., 10.)), -1)
         # 沿用SuperMimic的末端价值地形梯度：保留高度导数，截断地图起伏导数。
-        scan = physical[:, HEIGHT] + (self.actor_heightmap(state) - physical[:, HEIGHT]).detach()
+        scan = physical[:, HEIGHT] + (heightmap - physical[:, HEIGHT]).detach()
         heading_error = memory[:, HEADING_TARGET] - self.yaw(state)
         # 对齐main的任务记忆，追加当前奖励的上一腾空／支撑时长与首次接触；前一步动作已在特权80维中。
         task_memory = torch.cat((memory[:, ELAPSED_TIME:COMMAND_TIMER + 1],
@@ -352,25 +384,31 @@ class Go2ReferenceTaskModel:
         return torch.where(base_contact, torch.ones_like(orientation), orientation)
 
     def _replay_events(self, window):
-        """严格沿用参考按state基准高度估计的稀有事件，不添加地形修正。"""
+        """独立完整窗口入口复用与延迟读取相同的事件列定义。"""
         physical = torch.cat((window.initial.physical[:, None], window.targets.physical), 1)
-        batch, length = physical.shape[:2]
-        flat = physical.flatten(0, 1)
-        feet = flat[:, FEET].reshape(-1, 4, 3)
-        height = flat[:, HEIGHT] + feet[..., 2]
-        contact = (height < .035).reshape(batch, length, 4)
+        return self._events_from_features(physical[..., self.replay_feature_indices], window.valid)
+
+    @staticmethod
+    def _events_from_features(features, valid):
+        feet = features[..., 1:13].reshape(*features.shape[:-1], 4, 3)
+        height = features[..., :1] + feet[..., 2]
+        contact = height < .035
         flight = ~contact.any(-1)
         changes = (contact[:, 1:] != contact[:, :-1]).sum(-1)
-        hard_motion = physical[..., VELOCITY_HEADING][..., 2].abs() > .6
-        falls = ~window.valid[:, -1]
-        return changes, flight, hard_motion, falls
+        hard_motion = features[..., 13].abs() > .6
+        return changes, flight, hard_motion, ~valid[:, -1]
 
-    def replay_priority(self, window) -> Tensor:
-        """严格按来源计算接触切换、飞行和窗口提前结束的分数。"""
-        changes, flight, _, falls = self._replay_events(window)
-        return changes.sum(-1).float() + flight.sum(-1).float() + 4.0 * falls.float()
+    @staticmethod
+    def _selection_from_events(events):
+        changes, flight, hard_motion, falls = events
+        priority = changes.sum(-1).float() + flight.sum(-1).float() + 4.0 * falls.float()
+        worthy = (flight.sum(-1) >= 2) | hard_motion.any(-1) | falls
+        return priority, worthy
 
-    def archive_worthy(self, window) -> Tensor:
-        """归档至少两帧飞行、明显垂向运动或真实跌倒。"""
-        _, flight, hard_motion, falls = self._replay_events(window)
-        return (flight.sum(-1) >= 2) | hard_motion.any(-1) | falls
+    def replay_selection(self, window):
+        """完整窗口的显式事件接口；只求值一次接触、飞行和跌倒。"""
+        return self._selection_from_events(self._replay_events(window))
+
+    def replay_selection_from_features(self, features, valid):
+        """候选只读取十四列后评分，不触及其余状态、记忆或动作。"""
+        return self._selection_from_events(self._events_from_features(features, valid))

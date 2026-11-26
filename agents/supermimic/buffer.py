@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 
 import torch
 from torch import Tensor
@@ -37,10 +37,9 @@ class Window:
 
     @staticmethod
     def concatenate(windows):
-        def states(name):
-            return TaskState(**{field.name: torch.cat([getattr(getattr(window, name), field.name) for window in windows])
-                                for field in fields(TaskState)})
-        return Window(states("initial"), torch.cat([window.actions for window in windows]), states("targets"),
+        initial = TaskState.from_flat(torch.cat([window.initial.data for window in windows]), windows[0].initial.widths)
+        targets = TaskState.from_flat(torch.cat([window.targets.data for window in windows]), windows[0].targets.widths)
+        return Window(initial, torch.cat([window.actions for window in windows]), targets,
                       torch.cat([window.valid for window in windows]), torch.cat([window.terminated for window in windows]))
 
 
@@ -79,7 +78,7 @@ class Replay:
 
     def _state_storage(self, shape):
         widths = (self.spec.state_dim, self.spec.memory_dim, self.spec.command_dim, self.spec.context_dim)
-        return TaskState(*(torch.zeros(*shape, width, device=self.device) for width in widths))
+        return TaskState.from_flat(torch.zeros(*shape, sum(widths), device=self.device), widths)
 
     def clear(self):
         self.size = self.clock = 0
@@ -93,8 +92,7 @@ class Replay:
     @torch.no_grad()
     def add(self, state: TaskState, history: Tensor, action: Tensor, result):
         slot = self.clock % self.capacity
-        for field in fields(TaskState):
-            getattr(self.states, field.name)[slot].copy_(getattr(state, field.name))
+        self.states.data[slot].copy_(state.data)
         self.actions[slot].copy_(action)
         self.done[slot].copy_(result.terminated | result.truncated)
         self.terminated[slot].copy_(result.terminated)
@@ -132,7 +130,8 @@ class Replay:
             absolute = self.clock - self.size + logical
         return rows, absolute
 
-    def _sample_indices(self, batch: int, horizon: int, *, device_indices=False):
+    def sample_window_indices(self, batch: int, horizon: int, *, device_indices=False):
+        """只消费现行窗口采样随机数，延迟完整状态读取。"""
         rows, absolute = self._sample_positions(batch, horizon, device_indices)
         return rows, absolute % self.capacity
 
@@ -149,7 +148,15 @@ class Replay:
         return Seed(self.states.index((slots, rows)), history)
 
     def sample_windows(self, batch: int, horizon: int, *, device_indices=False) -> Window:
-        rows, starts = self._sample_indices(batch, horizon, device_indices=device_indices)
+        rows, starts = self.sample_window_indices(batch, horizon, device_indices=device_indices)
+        return self.gather_windows(rows, starts, horizon)
+
+    def gather_windows(self, rows: Tensor, starts: Tensor, horizon: int) -> Window:
+        """按给定TE索引读取完整窗口，保持next-slot目标和结束当步无效语义。"""
+        if self.device.type == "cuda":
+            from .archive_kernels import gather_windows
+
+            return gather_windows(self, rows, starts, horizon)
         slots = (starts[:, None] + torch.arange(horizon, device=self.device)) % self.capacity
         done = self.done[slots, rows[:, None]]
         valid = (~done).cumprod(dim=1).bool()
@@ -157,9 +164,16 @@ class Replay:
                       self.states.index(((slots + 1) % self.capacity, rows[:, None])), valid,
                       self.terminated[slots, rows[:, None]])
 
+    def window_features(self, rows: Tensor, starts: Tensor, horizon: int, feature_indices: Tensor):
+        """只读取起点及H个next-slot的指定physical列，避免候选完整状态搬运。"""
+        slots = (starts[:, None] + torch.arange(horizon + 1, device=self.device)) % self.capacity
+        features = self.states.data[slots[:, :, None], rows[:, None, None], feature_indices[None, None, :]]
+        done = self.done[slots[:, :-1], rows[:, None]]
+        return features, (~done).cumprod(dim=1).bool()
+
 
 class WindowArchive:
-    """固定形状候选按掩码写入；环形计数留在设备，无效候选独占暂存槽。"""
+    """按精确掩码读取和归档；无效候选不搬运窗口，计数留在设备。"""
 
     def __init__(self, capacity: int, device="cpu"):
         self.capacity = capacity
@@ -171,6 +185,33 @@ class WindowArchive:
         self.size.zero_()
         self.clock.zero_()
 
+    def _allocate(self, state, actions, horizon, widths):
+        """首批候选分配固定容量，不读取设备上的有效数量。"""
+        self.storage = Window(
+            TaskState.from_flat(state.new_zeros(self.capacity, state.shape[-1]), widths),
+            actions.new_zeros(self.capacity, horizon, actions.shape[-1]),
+            TaskState.from_flat(state.new_zeros(self.capacity, horizon, state.shape[-1]), widths),
+            torch.zeros(self.capacity, horizon, dtype=torch.bool, device=state.device),
+            torch.zeros(self.capacity, horizon, dtype=torch.bool, device=state.device))
+        self.size, self.clock = self.size.to(state.device), self.clock.to(state.device)
+
+    def _accepted_indices(self, keep):
+        rank = keep.long().cumsum(0) - 1
+        accepted = keep & (rank < self.capacity)
+        return accepted, (self.clock + rank) % self.capacity
+
+    def _commit(self, accepted):
+        count = accepted.sum()
+        self.clock.add_(count)
+        self.size.add_(count).clamp_max_(self.capacity)
+
+    def _write_cpu(self, windows, indices):
+        self.storage.initial.data[indices] = windows.initial.data
+        self.storage.targets.data[indices] = windows.targets.data
+        self.storage.actions[indices] = windows.actions
+        self.storage.valid[indices] = windows.valid
+        self.storage.terminated[indices] = windows.terminated
+
     @torch.no_grad()
     def add(self, windows: Window, keep: Tensor | None = None):
         candidates = windows.actions.shape[0]
@@ -178,48 +219,51 @@ class WindowArchive:
         if candidates == 0 or self.capacity == 0:
             return
         if self.storage is None:
-            # 首批候选即分配，不读取有效数量；候选批次大小由调用方固定。
-            def allocate(value):
-                return torch.zeros((self.capacity + candidates, *value.shape[1:]), dtype=value.dtype, device=device)
-
-            self.storage = Window(windows.initial.map(allocate), allocate(windows.actions), windows.targets.map(allocate),
-                                  allocate(windows.valid), allocate(windows.terminated))
-            self.size, self.clock = self.size.to(device), self.clock.to(device)
+            self._allocate(windows.initial.data, windows.actions, windows.actions.shape[1], windows.initial.widths)
         keep = torch.ones(candidates, dtype=torch.bool, device=device) if keep is None else keep
-        rank = keep.long().cumsum(0) - 1
-        accepted = keep & (rank < self.capacity)
-        # 有效行在真实容量内地址唯一；无效行分别落入容量之外，绝不覆盖有效数据。
-        indices = torch.where(accepted, (self.clock + rank) % self.capacity,
-                              self.capacity + torch.arange(candidates, device=device))
-        for name in ("initial", "targets"):
-            for field in fields(TaskState):
-                getattr(getattr(self.storage, name), field.name)[indices] = getattr(getattr(windows, name), field.name)
-        for name in ("actions", "valid", "terminated"):
-            getattr(self.storage, name)[indices] = getattr(windows, name)
-        count = accepted.sum()
-        self.clock.add_(count)
-        self.size.add_(count).clamp_max_(self.capacity)
+        accepted, indices = self._accepted_indices(keep)
+        if device.type == "cuda":
+            from .archive_kernels import write_windows
 
-    def _sample(self, batch):
+            write_windows(self.storage, windows, accepted, indices)
+        else:
+            self._write_cpu(windows.index(accepted), indices[accepted])
+        self._commit(accepted)
+
+    @torch.no_grad()
+    def add_from_replay(self, replay: Replay, rows: Tensor, starts: Tensor, horizon: int, valid: Tensor, keep: Tensor):
+        """在精确keep掩码下直接从TE回放入库，不构造全部候选完整窗口。"""
+        if rows.numel() == 0 or self.capacity == 0:
+            return
+        if self.storage is None:
+            self._allocate(replay.states.data, replay.actions, horizon, replay.states.widths)
+        accepted, indices = self._accepted_indices(keep)
+        if replay.device.type == "cuda":
+            from .archive_kernels import write_from_replay
+
+            write_from_replay(self.storage, replay, rows, starts, horizon, valid, accepted, indices)
+        else:
+            selected = replay.gather_windows(rows[accepted], starts[accepted], horizon)
+            self._write_cpu(selected, indices[accepted])
+        self._commit(accepted)
+
+    def _sample_indices(self, batch):
         # 设备上界避免提取size；FP64随机数量化误差远小于FP32，随机流不同于randint。
         bound = self.size.clamp_min(1)
         indices = (torch.rand(batch, dtype=torch.float64, device=self.size.device) * bound).long()
-        return self.storage.index(indices.clamp_max(bound - 1))
+        return indices.clamp_max(bound - 1)
 
     def sample(self, batch: int) -> Window:
-        return self._sample(batch)
+        return self.storage.index(self._sample_indices(batch))
 
-    def sample_or(self, fallback: Window, populated: Tensor) -> Window:
-        """按写入前的占用快照选择归档或均匀窗口，首次入库不提前增加归档份额。"""
-        if self.storage is None:
-            return fallback
-        sampled = self._sample(fallback.actions.shape[0])
+    def sample_or_replay(self, replay: Replay, rows: Tensor, starts: Tensor, horizon: int, populated: Tensor) -> Window:
+        """沿用入库前占用快照和FP64抽样，设备上仅读取实际选中来源。"""
+        indices = self._sample_indices(rows.shape[0])
+        if replay.device.type == "cuda":
+            from .archive_kernels import gather_windows
 
-        def state(name):
-            return TaskState(**{field.name: torch.where(populated, getattr(getattr(sampled, name), field.name),
-                                                       getattr(getattr(fallback, name), field.name))
-                                for field in fields(TaskState)})
-
-        return Window(state("initial"), torch.where(populated, sampled.actions, fallback.actions), state("targets"),
-                      torch.where(populated, sampled.valid, fallback.valid),
-                      torch.where(populated, sampled.terminated, fallback.terminated))
+            window = self.storage
+            archive = (window.initial.data, window.actions, window.targets.data, window.valid,
+                       window.terminated, indices, populated)
+            return gather_windows(replay, rows, starts, horizon, archive)
+        return self.storage.index(indices) if bool(populated) else replay.gather_windows(rows, starts, horizon)

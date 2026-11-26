@@ -6,11 +6,15 @@
 
 from __future__ import annotations
 
+from types import MethodType
+
 import torch
 from mjlab.envs import ManagerBasedRlEnv
 
+from agents.supermimic.compilation import compile_kernel
 from agents.supermimic.interfaces import EnvStep
 
+from .mjlab_step import step_manual_reset
 from ..config.env_cfgs import resolve_go2_supermimic_cfg
 from ..go_supermimic_env_cfg import make_go2_supermimic_env_cfg
 from ..mdp.curriculums import CommandCurriculum, TerrainCurriculum
@@ -49,6 +53,8 @@ class Go2TransitionAdapter:
         if video_width is not None:
             env_cfg.viewer.width = video_width
         self.raw_env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
+        if not self.play:
+            self.raw_env.step = MethodType(step_manual_reset, self.raw_env)
         try:
             self.num_envs = self.raw_env.num_envs
             self.robot = self.raw_env.scene["robot"]
@@ -60,6 +66,10 @@ class Go2TransitionAdapter:
             self.task = Go2ReferenceTaskModel(self.cfg, self.robot.data.default_joint_pos[0].clone(),
                                   self.robot.data.soft_joint_pos_limits[0].clone(), self.surface, device=self.device)
             self.task.bind_env(self.raw_env)
+            self.foot_geom_id = self.raw_env.sim.mj_model.geom("robot/FL_foot_collision").id
+            self.base_body_id = self.raw_env.sim.mj_model.body("robot/base").id
+            self.nominal_body_ipos = torch.as_tensor(
+                self.raw_env.sim.mj_model.body_ipos[self.base_body_id].copy(), device=self.device)
             self.command_curriculum = CommandCurriculum(self.cfg.commands, self.map.family_names, self.device)
             self.terrain_curriculum = TerrainCurriculum(
                 self.map, self.num_envs, self.cfg.terrain.max_init_level, enabled=self.cfg.terrain.curriculum,
@@ -76,6 +86,11 @@ class Go2TransitionAdapter:
             self.last_metrics = {}
             self._episode_reward_sums = {name: torch.zeros(self.num_envs, device=self.device)
                                          for name in self.cfg.to_dict()["reward"]["scales"]}
+            self._reward_names = tuple(self.task.reward_scales)
+            compiled = not self.play and self.device.type == "cuda" and self.cfg.runner.cuda_graph
+            self.task.configure_collection_compile(enabled=compiled, backend=self.cfg.algo.compile_backend)
+            self._transition_kernel = (compile_kernel(self._transition_tensors, self.cfg.algo.compile_backend)
+                                       if compiled else self._transition_tensors)
         except BaseException:
             self.raw_env.close()
             raise
@@ -118,12 +133,12 @@ class Go2TransitionAdapter:
 
     def _context(self, ids):
         context = torch.zeros((ids.numel(), CONTEXT_DIM), dtype=torch.float32, device=self.device)
-        foot = self.raw_env.sim.mj_model.geom("robot/FL_foot_collision").id
+        foot = self.foot_geom_id
         friction = self.raw_env.sim.model.geom_friction
         context[:, CONTEXT_FRICTION] = (friction[ids, foot, 0] if friction.ndim == 3 else friction[foot, 0])
-        base = self.raw_env.sim.mj_model.body("robot/base").id
+        base = self.base_body_id
         ipos = self.raw_env.sim.model.body_ipos
-        nominal = torch.as_tensor(self.raw_env.sim.mj_model.body_ipos[base].copy(), device=self.device)
+        nominal = self.nominal_body_ipos
         context[:, CONTEXT_COM] = (ipos[ids, base] if ipos.ndim == 3 else ipos[base]) - nominal
         context[:, CONTEXT_ENCODER_BIAS] = self.robot.data.encoder_bias[ids]
         context[:, CONTEXT_ORIGIN] = self.raw_env.scene.env_origins[ids]
@@ -140,7 +155,7 @@ class Go2TransitionAdapter:
         self.raw_env.reset(env_ids=ids)
         physical = self.task.read_physical(self.raw_env)
         context = self._context(ids)
-        reset_state = self.task.initialize_state(physical[ids].clone(), context)
+        reset_state = self.task.initialize_state(physical[ids], context)
         if self._play_commands is not None:
             reset_state.command.copy_(self._play_commands[ids])
             reset_state.memory[:, COMMAND_OVERRIDE] = 1
@@ -166,59 +181,65 @@ class Go2TransitionAdapter:
 
     # ---------- 真实转移 ----------
 
-    @torch.no_grad()
-    def step(self, actions):
-        before = self._state.detached_clone()
-        versions = self.context_version.clone()
-        _, _, _, raw_truncated, _ = self.raw_env.step(actions)
-        physical = self.task.read_physical(self.raw_env).clone()
-        contact_sensor = self.raw_env.scene["feet_ground_contact"]
-        sensor = contact_sensor.data
-        final = self.task.advance(before, actions, physical,
-                                  contact_times=(sensor.current_air_time.clone(), sensor.current_contact_time.clone(),
-                                                 sensor.last_air_time.clone(), contact_sensor.compute_first_contact(self.step_dt).float(),
-                                                 sensor.last_contact_time.clone())).detached_clone()
-        if self._play_commands is not None:
-            final.command.copy_(self._play_commands)
+    def _transition_tensors(self, before, actions, physical, contact_times, raw_truncated,
+                            play_commands, episode_sums):
+        """融合完整转移评分和分项累计，不读取仿真或课程的Python步号。"""
+        final = self.task.advance(before, actions, physical, contact_times=contact_times)
+        if play_commands is not None:
+            final.command.copy_(play_commands)
         terminated = (torch.zeros(self.num_envs, dtype=torch.bool, device=self.device) if self.no_terminations
                       else self.task.hard_termination(final))
         truncated = raw_truncated.clone()
         if not self.map.plane and not self.no_terminations:
-            # 对齐官方：越过核心地形边界4米视为超时，不施加失败惩罚。
+            # 沿用核心地形外4米的超时定义，不增加失败惩罚。
             truncated |= (self.task.world_position(final)[:, :2].abs() > self.terrain_half_size).any(-1)
         terms = self.task.reward_terms(before, actions, final, terminated.float())
-        reward = (self.step_dt * sum(self.task.reward_scales[name] * value
-                                     for name, value in terms.items())).detach().clone()
-        for name, value in terms.items():
-            self._episode_reward_sums[name].add_(self.step_dt * self.task.reward_scales[name] * value)
+        dt = self.task.dt
+        reward = dt * sum(self.task.reward_scales[name] * value for name, value in terms.items())
+        for name, total in zip(self._reward_names, episode_sums, strict=True):
+            total.add_(dt * self.task.reward_scales[name] * terms[name])
         velocity = self.task.tracking_velocity(final)
         linear_error = velocity[:, :2] - before.command[:, :2]
         angular_error = velocity[:, 2] - before.command[:, 2]
+        metrics = {f"reward/{name}": value.float().mean() for name, value in terms.items()}
+        metrics.update(tracking_linear_mse=linear_error.square().sum(-1).mean(),
+                       tracking_angular_mse=angular_error.square().mean(),
+                       action_rms=actions.square().mean().sqrt(),
+                       exteroceptive_fraction=self.task.actor_mask(before).mean(),
+                       base_height=self.task.physical_features(final)[:, 0].mean(),
+                       fast_yaw=(final.physical[:, ANGULAR_BODY][:, 2].abs() > 3.0).float().mean())
+        return final, reward, terminated, truncated, metrics
+
+    @torch.no_grad()
+    def step(self, actions):
+        before = self._state
+        versions = self.context_version.clone()
+        _, _, _, raw_truncated, _ = self.raw_env.step(actions)
+        physical = self.task.read_physical(self.raw_env)
+        contact_sensor = self.raw_env.scene["feet_ground_contact"]
+        sensor = contact_sensor.data
+        contact_times = (sensor.current_air_time, sensor.current_contact_time, sensor.last_air_time,
+                         contact_sensor.compute_first_contact(self.step_dt).float(), sensor.last_contact_time)
+        episode_sums = tuple(self._episode_reward_sums[name] for name in self._reward_names)
+        final, reward, terminated, truncated, metrics = self._transition_kernel(
+            before, actions, physical, contact_times, raw_truncated, self._play_commands, episode_sums)
         if not self.play:
             self.command_curriculum.control_steps += 1
             self.terrain_curriculum.control_steps = self.raw_env.common_step_counter
+        # reset只写新内部副本，final和调用方持有的旧next_state始终独立。
         self._state = final.detached_clone()
         done_ids = (terminated | truncated).nonzero().flatten()
-        # 对齐HIM：先用已执行的旧命令结算课程，再累计本步，结束行随后清零。
         self.terrain_curriculum.update(self.raw_env, done_ids, before.command)
         self.terrain_curriculum.advance(before.command, self.robot.data.heading_w, self.step_dt)
         episode_metrics = {}
         if done_ids.numel():
-            # 对齐MjLab：提前结束也除以最大回合时长，包含结束步的贡献。
             episode_metrics = {f"episode_reward/{name}": self._episode_reward_sums[name][done_ids].mean()
-                               / self.cfg.env.episode_length_s for name in terms}
+                               / self.cfg.env.episode_length_s for name in self._reward_names}
             self._reset_rows(done_ids)
-        self.last_metrics = {f"reward/{name}": value.float().mean() for name, value in terms.items()}
+        self.last_metrics = metrics
         self.last_metrics.update(episode_metrics)
         self.last_metrics.update(terrain_level=self.terrain_curriculum.levels.float().mean(),
-                                 command_stage_iteration=float(self.command_curriculum.iteration),
-                                 tracking_linear_mse=linear_error.square().sum(-1).mean(),
-                                 tracking_angular_mse=angular_error.square().mean(),
-                                 action_rms=actions.square().mean().sqrt(),
-                                 exteroceptive_fraction=self.task.actor_mask(before).mean(),
-                                 base_height=self.task.physical_features(final)[:, 0].mean(),
-                                 # 参考 train.py:406 的诊断量：机体系偏航角速度超过 3 rad/s 的比例，用于发现打转。
-                                 fast_yaw=(final.physical[:, ANGULAR_BODY][:, 2].abs() > 3.0).float().mean())
+                                 command_stage_iteration=float(self.command_curriculum.iteration))
         return EnvStep(final, self._state.detached_clone(), reward, terminated, truncated, versions)
 
     # ---------- 课程持久化与资源释放 ----------

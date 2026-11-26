@@ -83,6 +83,10 @@ class WorldModel(nn.Module):
         """共享一次网络前向，监督同时取得推进状态与未施加输出链接的原始预测。"""
         inputs = (self.task.model_input(state, action) if recorded_current is None
                   else self.task.supervised_model_input(state, action, recorded_current))
+        return self.predict_from_input(state, action, inputs)
+
+    def predict_from_input(self, state: TaskState, action: Tensor, inputs: Tensor) -> tuple[TaskState, Tensor]:
+        """消费已装配的输入，供同一状态的高程查询显式复用。"""
         normalized = self.input_norm(inputs)
         if self.use_bf16:
             # 仅网络参与混合精度；反归一化及任务状态推进保持 FP32。

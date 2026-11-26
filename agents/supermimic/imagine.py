@@ -27,16 +27,18 @@ class ImaginedData:
 class Imagination:
     def __init__(self, task, actor, model, critic, config):
         self.task, self.actor, self.model, self.critic, self.config = task, actor, model, critic, config
-        self.step = (torch.compile(self._step, backend=config.compile_backend, dynamic=False)
+        self.step = (compile_kernel(self._step, config.compile_backend, fallback_random=False, emulate_precision_casts=False)
                      if config.compile_imagination else self._step)
         self._return_kernel = (compile_kernel(self._lambda_returns, config.compile_backend)
                                if config.compile_imagination else self._lambda_returns)
 
     def _step(self, state: TaskState, history: Tensor):
-        action = self.actor(history, self.task.actor_heightmap(state), self.task.actor_mask(state))
+        heightmap = self.task.actor_heightmap(state)
+        action = self.actor(history, heightmap, self.task.actor_mask(state))
         with torch.no_grad():
-            features = self.task.privileged(state)
-        predicted = self.model(state, action)
+            features = self.task.privileged_from_heightmap(state, heightmap)
+        inputs = self.task.model_input_from_heightmap(state, action, heightmap)
+        predicted = self.model.predict_from_input(state, action, inputs)[0]
         failure = self.task.soft_termination(predicted)
         reward = self.task.reward(state, action, predicted, failure)
         frame = self.task.observe(predicted, noisy=True)

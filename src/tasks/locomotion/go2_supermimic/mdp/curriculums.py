@@ -14,6 +14,7 @@ class CommandCurriculum:
     def __init__(self, cfg, families, device="cpu"):
         self.cfg = deepcopy(cfg)
         self.device = torch.device(device)
+        self.initial_ranges = torch.tensor(self.cfg.initial_ranges, dtype=torch.float32, device=self.device).flatten()
         self.control_steps = 0
 
     @property
@@ -21,8 +22,7 @@ class CommandCurriculum:
         return self.control_steps
 
     def parameters(self, family_ids):
-        bounds = torch.tensor(self.cfg.initial_ranges, dtype=torch.float32, device=self.device)
-        return (bounds.flatten().expand(family_ids.numel(), -1),
+        return (self.initial_ranges.expand(family_ids.numel(), -1),
                 torch.full((family_ids.numel(), 1), self.cfg.rel_standing_envs, device=self.device))
 
     def state_dict(self):
