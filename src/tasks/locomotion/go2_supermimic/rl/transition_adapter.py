@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-from contextlib import ExitStack
-
 import torch
 from mjlab.envs import ManagerBasedRlEnv
 
@@ -16,9 +14,8 @@ from agents.supermimic.interfaces import EnvStep
 from ..config.env_cfgs import resolve_go2_supermimic_cfg
 from ..go_supermimic_env_cfg import make_go2_supermimic_env_cfg
 from ..mdp.curriculums import CommandCurriculum, TerrainCurriculum
-from ..mdp.parkour import PARKOUR_FAMILIES, SPECIAL_FAMILIES
 from ..mdp.state_spec import (
-    CONTEXT_DIM, CONTEXT_ENCODER_BIAS, CONTEXT_FRICTION, CONTEXT_TERRAIN_FAMILY, PARKOUR_CONTEXT_DIM,
+    CONTEXT_DIM, CONTEXT_ENCODER_BIAS, CONTEXT_FRICTION,
     CONTEXT_EXTEROCEPTIVE_MASK, CONTEXT_ORIGIN, CONTEXT_RANGES, CONTEXT_ZERO_PROBABILITY,
     COMMAND_OVERRIDE,
 )
@@ -51,18 +48,17 @@ class Go2TransitionAdapter:
             env_cfg.viewer.height = video_height
         if video_width is not None:
             env_cfg.viewer.width = video_width
-        with ExitStack() as cleanup:
-            self.raw_env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
-            cleanup.callback(self.raw_env.close)
+        self.raw_env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
+        try:
+            self.num_envs = self.raw_env.num_envs
             self.robot = self.raw_env.scene["robot"]
             self.device = self.robot.data.joint_pos.device
-            self.num_envs = self.raw_env.num_envs
             terrain = self.raw_env.scene.terrain
             self.map.bind(terrain.terrain_origins)
             self.surface = (PlaneSurface(device=self.device) if self.cfg.terrain.mode == "flat" else
                             TerrainSurface.from_model(self.raw_env.sim.mj_model, self.device, terrain_map=self.map))
             self.task = Go2ReferenceTaskModel(self.cfg, self.robot.data.default_joint_pos[0].clone(),
-                                             self.robot.data.soft_joint_pos_limits[0].clone(), self.surface, device=self.device)
+                                  self.robot.data.soft_joint_pos_limits[0].clone(), self.surface, device=self.device)
             self.task.bind_env(self.raw_env)
             self.command_curriculum = CommandCurriculum(self.cfg.commands, self.map.family_names, self.device)
             self.terrain_curriculum = TerrainCurriculum(
@@ -70,21 +66,19 @@ class Go2TransitionAdapter:
                 episode_length_s=self.cfg.env.episode_length_s, device=self.device)
             if not self.map.plane:
                 self.terrain_curriculum.family_ids.copy_(terrain.terrain_types)
-            self.parkour = self.cfg.terrain.mode == "parkour"
-            if self.parkour:
-                self.column_families = torch.tensor([PARKOUR_FAMILIES.index(name) for name in self.map.family_names],
-                                                    device=self.device)
-            always_visible = SPECIAL_FAMILIES if self.parkour else ("flat",)
-            self.mask_eligible = torch.tensor([name not in always_visible for name in self.map.family_names],
-                                              device=self.device)
+            # 源mask名单没有flat；其余保留地形分别对应discrete、stairs、slope。
+            self.mask_eligible = torch.tensor([name != "flat" for name in self.map.family_names], device=self.device)
             self.terrain_half_size = torch.tensor(
                 (self.map.rows * self.map.size[0] / 2 + 4., self.map.cols * self.map.size[1] / 2 + 4.), device=self.device)
             self.context_version = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+            self._state = None
             self._play_commands = None
             self.last_metrics = {}
             self._episode_reward_sums = {name: torch.zeros(self.num_envs, device=self.device)
                                          for name in self.cfg.to_dict()["reward"]["scales"]}
-            cleanup.pop_all()
+        except BaseException:
+            self.raw_env.close()
+            raise
 
     @property
     def step_dt(self):
@@ -96,21 +90,19 @@ class Go2TransitionAdapter:
 
     @torch.no_grad()
     def set_play_commands(self, commands=None):
-        """在播放重置后固定各环境的速度命令；None 恢复原命令采样。"""
-        state = self._state
+        """播放时固定各环境的速度命令，None恢复原命令采样；不改变训练配置。"""
         if commands is None:
             self._play_commands = None
-            state.memory[:, COMMAND_OVERRIDE] = 0
+            if self._state is not None:
+                self._state.memory[:, COMMAND_OVERRIDE] = 0
             return
         values = torch.as_tensor(commands, dtype=torch.float32, device=self.device)
         if values.shape == (3,):
             values = values.unsqueeze(0).expand(self.num_envs, -1)
-        elif values.shape != state.command.shape:
-            raise ValueError("Playback commands must have shape [3] or [num_envs, 3]")
-        values = values.clone()
-        state.command.copy_(values)
-        state.memory[:, COMMAND_OVERRIDE] = 1
-        self._play_commands = values
+        self._play_commands = values.clone()
+        if self._state is not None:
+            self._state.command.copy_(self._play_commands)
+            self._state.memory[:, COMMAND_OVERRIDE] = 1
 
     # ---------- 回合重置 ----------
 
@@ -125,8 +117,7 @@ class Go2TransitionAdapter:
         terrain.terrain_types[ids] = self.terrain_curriculum.family_ids[ids] + self.map.rings
 
     def _context(self, ids):
-        width = PARKOUR_CONTEXT_DIM if self.parkour else CONTEXT_DIM
-        context = torch.zeros((ids.numel(), width), dtype=torch.float32, device=self.device)
+        context = torch.zeros((ids.numel(), CONTEXT_DIM), dtype=torch.float32, device=self.device)
         foot = self.raw_env.sim.mj_model.geom("robot/FL_foot_collision").id
         friction = self.raw_env.sim.model.geom_friction
         context[:, CONTEXT_FRICTION] = (friction[ids, foot, 0] if friction.ndim == 3 else friction[foot, 0])
@@ -136,18 +127,15 @@ class Go2TransitionAdapter:
         context[:, CONTEXT_COM] = (ipos[ids, base] if ipos.ndim == 3 else ipos[base]) - nominal
         context[:, CONTEXT_ENCODER_BIAS] = self.robot.data.encoder_bias[ids]
         context[:, CONTEXT_ORIGIN] = self.raw_env.scene.env_origins[ids]
-        columns = self.terrain_curriculum.family_ids[ids]
-        if self.parkour:
-            context[:, CONTEXT_TERRAIN_FAMILY] = self.column_families[columns]
-        bounds, probability = self.command_curriculum.parameters(columns)
+        bounds, probability = self.command_curriculum.parameters(self.terrain_curriculum.family_ids[ids])
         context[:, CONTEXT_RANGES] = bounds
         context[:, CONTEXT_ZERO_PROBABILITY] = probability.squeeze(-1)
-        eligible = self.mask_eligible[columns]
+        eligible = self.mask_eligible[self.terrain_curriculum.family_ids[ids]]
         enabled = torch.rand(ids.numel(), device=self.device) >= self.cfg.teacher.exteroceptive_dropout
         context[:, CONTEXT_EXTEROCEPTIVE_MASK] = (enabled | ~eligible).float()
         return context
 
-    def _reset_rows(self, ids, *, full=False):
+    def _reset_rows(self, ids):
         self._set_origins(ids)
         self.raw_env.reset(env_ids=ids)
         physical = self.task.read_physical(self.raw_env)
@@ -156,7 +144,7 @@ class Go2TransitionAdapter:
         if self._play_commands is not None:
             reset_state.command.copy_(self._play_commands[ids])
             reset_state.memory[:, COMMAND_OVERRIDE] = 1
-        if full:
+        if self._state is None:
             self._state = reset_state.detached_clone()
         else:
             for name in ("physical", "memory", "command", "context"):
@@ -172,7 +160,7 @@ class Go2TransitionAdapter:
         ids = torch.arange(self.num_envs, device=self.device) if env_ids is None else env_ids
         if ids.numel() == 0:
             return self._state.detached_clone()
-        self._reset_rows(ids, full=env_ids is None)
+        self._reset_rows(ids)
         self.last_metrics = {}
         return self._state.detached_clone()
 
@@ -184,13 +172,12 @@ class Go2TransitionAdapter:
         versions = self.context_version.clone()
         _, _, _, raw_truncated, _ = self.raw_env.step(actions)
         physical = self.task.read_physical(self.raw_env).clone()
-        feet = self.raw_env.scene["feet_ground_contact"]
-        times = feet.data
-        final = self.task.advance_with_gait_times(
-            before, actions, physical, air_time=times.current_air_time, contact_time=times.current_contact_time,
-            last_air=times.last_air_time, first_contact=feet.compute_first_contact(self.step_dt),
-            last_contact=times.last_contact_time,
-        ).detached_clone()
+        contact_sensor = self.raw_env.scene["feet_ground_contact"]
+        sensor = contact_sensor.data
+        final = self.task.advance(before, actions, physical,
+                                  contact_times=(sensor.current_air_time.clone(), sensor.current_contact_time.clone(),
+                                                 sensor.last_air_time.clone(), contact_sensor.compute_first_contact(self.step_dt).float(),
+                                                 sensor.last_contact_time.clone())).detached_clone()
         if self._play_commands is not None:
             final.command.copy_(self._play_commands)
         terminated = (torch.zeros(self.num_envs, dtype=torch.bool, device=self.device) if self.no_terminations
@@ -232,7 +219,7 @@ class Go2TransitionAdapter:
                                  base_height=self.task.physical_features(final)[:, 0].mean(),
                                  # 参考 train.py:406 的诊断量：机体系偏航角速度超过 3 rad/s 的比例，用于发现打转。
                                  fast_yaw=(final.physical[:, ANGULAR_BODY][:, 2].abs() > 3.0).float().mean())
-        return EnvStep(final, self._state.detached_clone(), reward, terminated, truncated, versions, done_ids)
+        return EnvStep(final, self._state.detached_clone(), reward, terminated, truncated, versions)
 
     # ---------- 课程持久化与资源释放 ----------
 

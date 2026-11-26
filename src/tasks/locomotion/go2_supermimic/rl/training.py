@@ -6,14 +6,13 @@
 
 from __future__ import annotations
 
-from contextlib import ExitStack
 from dataclasses import asdict, fields
 from datetime import datetime
 from importlib.metadata import version
 import json
 import os
 from pathlib import Path
-import re
+import subprocess
 import sys
 import time
 
@@ -25,42 +24,20 @@ from agents.supermimic.config import ExecutionConfig, RUNNER_RUNTIME_FIELDS
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 from src.runtime import configure_cuda_libdevice
 
-from ..config.env_cfgs import resolve_go2_supermimic_cfg
-from ..config.loading import load_task_config
+from ..config.loading import load_task_config, algorithm_config
 from ..config.train_cfg import SuperMimicTrainConfig, TASK_MODES
 from .runner import make_go2_supermimic_runner
 
 
 # ---------- 参数与任务配置 ----------
 
-def _validate_arguments(args: SuperMimicTrainConfig) -> None:
-    if args.resume is None and (args.continue_run or args.reset_critic):
-        raise ValueError("continue_run and reset_critic require a resume checkpoint")
-    if re.fullmatch(r"cpu|cuda(?::\d+)?", args.device) is None:
-        raise ValueError("SuperMimic device must be cpu or one CUDA device such as cuda:0")
-    if not args.log_root.strip():
-        raise ValueError("log_root must be a nonempty path")
-    for name, value in (("experiment_name", args.experiment_name), ("run_name", args.run_name)):
-        if value in (".", "..") or "/" in value or "\\" in value:
-            raise ValueError(f"{name} must be a single directory component")
-    if not args.experiment_name.strip():
-        raise ValueError("experiment_name must not be empty")
-    if int(os.environ.get("WORLD_SIZE", "1")) != 1:
-        raise ValueError("Distributed SuperMimic training is not supported; WORLD_SIZE must be 1")
-
-
 def _resolve_task_config(task_id: str, args: SuperMimicTrainConfig):
     resume = Path(args.resume).expanduser().resolve() if args.resume is not None else None
-    if resume is not None and not resume.is_file():
-        raise FileNotFoundError(f"Checkpoint file not found: {resume}")
     source = Path(args.task_config).expanduser().resolve() if args.task_config is not None else None
     if source is None and resume is not None:
         source = resume.parent / "task_config.json"
-        if not source.is_file():
-            raise FileNotFoundError(f"Resume requires {source} or an explicit --task-config")
-    mode = TASK_MODES[task_id]
-    cfg = load_task_config(source, terrain_mode=mode)[0] if source is not None else Go2ReferenceCfg()
-    cfg = resolve_go2_supermimic_cfg(cfg, terrain_mode=mode)
+    cfg = load_task_config(source)[0] if source is not None else Go2ReferenceCfg()
+    cfg.terrain.mode = TASK_MODES[task_id]
     for field, value in (("num_envs", args.num_envs), ("seed", args.seed)):
         if value is not None:
             setattr(cfg.env, field, value)
@@ -71,49 +48,41 @@ def _resolve_task_config(task_id: str, args: SuperMimicTrainConfig):
         value = getattr(args, name)
         if value is not None:
             setattr(cfg.runner, name, value)
-    for name, value, minimum in (("max_iterations", cfg.runner.max_iterations, 1),
-                                 ("save_interval", cfg.runner.save_interval, 1),
-                                 ("log_interval", cfg.runner.log_interval, 1),
-                                 ("num_envs", cfg.env.num_envs, 2), ("seed", cfg.env.seed, 0)):
-        if value < minimum:
-            raise ValueError(f"{name} must be >= {minimum}")
     return cfg, resume, source
-
-
-def _resolve_device(requested: str) -> str:
-    if requested == "cpu":
-        return requested
-    device = torch.device(requested)
-    index = device.index if device.index is not None else 0
-    if not torch.cuda.is_available() or index >= torch.cuda.device_count():
-        raise ValueError(f"Requested CUDA device is unavailable: cuda:{index}; use --device cpu for CPU")
-    return f"cuda:{index}"
 
 
 # ---------- 运行快照与训练装配 ----------
 
 def _run_origin(task_id: str, args: SuperMimicTrainConfig, device: str, resume: Path | None, source: Path | None) -> dict:
-    """记录本次训练的启动参数与运行环境。"""
+    """收集命令、依赖版本与代码状态，供事件文本和params快照共同使用。"""
+    root = Path(__file__).resolve().parents[5]
+    workspace = {}
+    for name, command in (("revision", ["git", "rev-parse", "HEAD"]),
+                          ("status", ["git", "status", "--short"]),
+                          ("diff", ["git", "diff", "HEAD", "--"])):
+        try:
+            result = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=10, check=False)
+            workspace[name] = (result.stdout if name == "diff" else result.stdout.strip()) if result.returncode == 0 else None
+        except (OSError, subprocess.TimeoutExpired):
+            workspace[name] = None
     return {"task_id": task_id, "started_at": datetime.now().astimezone().isoformat(),
             "arguments": asdict(args), "device": device, "resume_from": resume,
             "task_config_source": source, "command": list(sys.argv), "python": sys.version,
             "torch": torch.__version__,
             "triton_libdevice_path": os.environ.get("TRITON_LIBDEVICE_PATH"),
-            "packages": {name: version(name) for name in ("mjlab", "mujoco", "mujoco-warp", "warp-lang", "tensorboard")}}
+            "packages": {name: version(name) for name in ("mjlab", "mujoco", "mujoco-warp", "warp-lang", "tensorboard")},
+            "workspace": workspace}
 
 
 def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
     """调用既有runner训练至目标轮次，周期保存模型和ONNX并返回独立产物目录。"""
     entry_started = time.perf_counter()
-    _validate_arguments(args)
     cfg, resume, source = _resolve_task_config(task_id, args)
     runtime = cfg.runner
-    device = _resolve_device(args.device)
+    device = args.device
     if torch.device(device).type == "cuda":
         configure_cuda_libdevice()
     log_root = (Path(args.log_root).expanduser() / args.experiment_name).resolve()
-    if cfg.terrain.mode == "parkour":
-        log_root = log_root / "parkour"
     name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
     if args.run_name:
         name += f"_{args.run_name}"
@@ -125,16 +94,8 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
     print(f"[INFO] Control updates enabled: {cfg.runner.enable_control_updates}", flush=True)
     execution = ExecutionConfig(**{field.name: getattr(runtime, field.name) for field in fields(ExecutionConfig)})
     runner = make_go2_supermimic_runner(cfg, device=device, log_dir=log_dir, execution=execution)
-    timing, execution = runner.timing, runner.execution
-
-    def close_timed(name, close):
-        started = time.perf_counter()
-        close()
-        timing.record_wall(name, time.perf_counter() - started)
-
-    with ExitStack() as cleanup:
-        cleanup.callback(close_timed, "environment_close", runner.env.close)
-        cleanup.callback(close_timed, "logger_close", runner.close)
+    try:
+        timing, execution = runner.timing, runner.execution
         if torch.device(device).type == "cuda":
             torch.cuda.synchronize(device)
         timing.record_wall("initialization", time.perf_counter() - entry_started)
@@ -152,8 +113,12 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
         origin.update(seed=cfg.env.seed, num_envs=cfg.env.num_envs)
         params = log_dir / "params"
         params.mkdir()
+        diff = origin["workspace"].pop("diff")
+        origin["workspace"]["diff_file"] = "params/git.diff" if diff is not None else None
+        if diff is not None:
+            (params / "git.diff").write_text(diff, encoding="utf-8")
         settings = cfg.to_dict()
-        agent = {"algorithm": settings.pop("algorithm"), "config": asdict(runner.config),
+        agent = {"algorithm": settings.pop("algorithm"), "config": asdict(algorithm_config(cfg)),
                  "execution": asdict(execution), "runner": settings.pop("runner")}
         settings.pop("algo")
         for filename, values in (("env.yaml", settings), ("agent.yaml", agent), ("run.yaml", origin)):
@@ -186,6 +151,11 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
                 checkpoint = log_dir / f"model_{runner.iteration}.pt"
                 runner.save(checkpoint)
                 print(f"[INFO] Saved checkpoint: {checkpoint}", flush=True)
+    finally:
+        try:
+            runner.close()
+        finally:
+            runner.env.close()
     if torch.device(device).type == "cuda":
         torch.cuda.synchronize(device)
     entry_seconds = time.perf_counter() - entry_started
@@ -197,7 +167,8 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
     summary["run"] = {
         "task_id": task_id, "seed": cfg.env.seed, "num_envs": cfg.env.num_envs,
         "initialized": True, "training_completed": True, "success": True, "error": None,
-        "start_iteration": starting_iteration, "target_iteration": runtime.max_iterations, "final_iteration": runner.iteration,
+        "start_iteration": starting_iteration, "target_iteration": runtime.max_iterations,
+        "final_iteration": runner.iteration,
         "new_real_steps_including_prefill": added_steps,
         "new_prefill_real_steps": prefill_steps, "new_training_real_steps": training_steps,
         "entry_real_transitions_per_second": added_steps / entry_seconds,

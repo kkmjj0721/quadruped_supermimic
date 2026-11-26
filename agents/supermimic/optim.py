@@ -11,22 +11,6 @@ from torch import nn
 from torch.optim._muon import _adjust_lr, _zeropower_via_newtonschulz
 
 
-def _muon_step_tensor_lr(parameters, gradients, momentum_buffers, learning_rate, *, momentum, nesterov,
-                         ns_coefficients, ns_steps, eps, weight_decay, adjust_lr_fn):
-    """按来源算术直接执行张量更新，由外层CUDA图统一捕获。"""
-    for parameter, gradient, buffer in zip(parameters, gradients, momentum_buffers, strict=True):
-        buffer.lerp_(gradient, 1 - momentum)
-        update = gradient.lerp(buffer, momentum) if nesterov else buffer
-        update = _zeropower_via_newtonschulz(update, ns_coefficients, ns_steps, eps)
-        ratio = _adjust_lr(1.0, adjust_lr_fn, parameter.shape)
-        # 先转参数精度再乘设备 lr，避免 BF16 更新量在缩放时再次舍入。
-        delta = update.to(parameter.dtype) * (learning_rate * -ratio)
-        if weight_decay != 0.0:
-            shrink = 1 - learning_rate * weight_decay
-            parameter.mul_(shrink)
-        parameter.add_(delta)
-
-
 class MuonAdam:
     """指定 MLP 的权重矩阵使用 Muon，其余参数使用 Adam。
 
@@ -59,22 +43,32 @@ class MuonAdam:
         self.adam.zero_grad(set_to_none=set_to_none)
 
     @torch.no_grad()
+    def _muon_step_tensor_lr(self):
+        """保持来源的浮点算术顺序，用设备标量更新学习率。"""
+        for group in self.muon.param_groups:
+            for parameter in group["params"]:
+                if parameter.grad is None:
+                    continue
+                state = self.muon.state[parameter]
+                if "momentum_buffer" not in state:
+                    state["momentum_buffer"] = torch.zeros_like(parameter.grad, memory_format=torch.preserve_format)
+                momentum = state["momentum_buffer"]
+                momentum.lerp_(parameter.grad, 1 - group["momentum"])
+                update = parameter.grad.lerp(momentum, group["momentum"]) if group["nesterov"] else momentum
+                update = _zeropower_via_newtonschulz(update, group["ns_coefficients"], group["ns_steps"], group["eps"])
+                ratio = _adjust_lr(1.0, group["adjust_lr_fn"], parameter.shape)
+                # 先转参数精度再乘设备 lr，避免 BF16 更新量在缩放时再次舍入。
+                delta = update.to(parameter.dtype) * (group["lr"] * -ratio)
+                if group["weight_decay"] != 0.0:
+                    shrink = 1 - group["lr"] * group["weight_decay"]
+                    parameter.mul_(shrink)
+                parameter.add_(delta)
+
+    @torch.no_grad()
     def step(self):
         """按当前执行方式依次更新 Muon 与 Adam 参数。"""
         if self.capturable:
-            for group in self.muon.param_groups:
-                parameters = group["params"]
-                gradients, momentum_buffers = [], []
-                for parameter in parameters:
-                    state = self.muon.state[parameter]
-                    if "momentum_buffer" not in state:
-                        state["momentum_buffer"] = torch.zeros_like(parameter.grad, memory_format=torch.preserve_format)
-                    gradients.append(parameter.grad)
-                    momentum_buffers.append(state["momentum_buffer"])
-                _muon_step_tensor_lr(parameters, gradients, momentum_buffers, group["lr"], momentum=group["momentum"],
-                                     nesterov=group["nesterov"], ns_coefficients=group["ns_coefficients"],
-                                     ns_steps=group["ns_steps"], eps=group["eps"], weight_decay=group["weight_decay"],
-                                     adjust_lr_fn=group["adjust_lr_fn"])
+            self._muon_step_tensor_lr()
         else:
             self.muon.step()
         self.adam.step()

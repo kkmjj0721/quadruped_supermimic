@@ -34,9 +34,10 @@ class Go2Kinematics(nn.Module):
                 parents.append(-1)
                 joints.append(-1)
             else:
+                joint_name = model.joint(joint).name
                 parent = int(model.body_parentid[body])
                 parents.append(mj_to_local[parent])
-                joints.append(joint_indices[model.joint(joint).name])
+                joints.append(joint_indices[joint_name])
             mj_to_local[body] = len(bodies)
             bodies.append(name)
             axes.append(model.jnt_axis[joint].copy())
@@ -65,8 +66,12 @@ class Go2Kinematics(nn.Module):
         feet = torch.stack([rotations[parent] for parent in self.site_parents], -3)
         return torch.atan2(feet[..., 1, 0], feet[..., 0, 0])
 
-    def _body_kinematics(self, p, R, v, w, q, qd):
-        """在一棵关节树上运输各刚体原点的世界位姿和速度。"""
+    def forward(self, p, R, v, w, q, qd):
+        """返回世界系髋4／膝4／足4位置和足4线速度，保留任意前置批次维度。
+
+        p/R/v/w 是根部世界位置、旋转、线速度与角速度；q/qd 为 JOINT_NAMES
+        顺序的真实关节角和速度。几何 buffer 与输入应在同一设备和精度。
+        """
         positions, rotations, velocities, angular = ([None] * self.num_bodies for _ in range(4))
         for index in range(self.num_bodies):
             parent = self.parents[index]
@@ -81,26 +86,6 @@ class Go2Kinematics(nn.Module):
             omega = angular[parent] + mv3(rotation_offset, self.axes[index]) * qd[..., joint:joint + 1]
             velocity = velocities[parent] + torch.cross(angular[parent], displacement, dim=-1)
             positions[index], rotations[index], velocities[index], angular[index] = position, rotation, velocity, omega
-        return positions, rotations, velocities, angular
-
-    def foot_volume_points(self, generalized, offsets):
-        """由 calf 局部采样点计算四足共16点的世界位置及三维速度。"""
-        positions, rotations, velocities, angular = self._body_kinematics(*generalized)
-        feet = self.site_parents
-        rotation = torch.stack([rotations[i] for i in feet], -3)
-        displacement = offsets @ rotation.transpose(-2, -1)
-        points = torch.stack([positions[i] for i in feet], -2).unsqueeze(-2) + displacement
-        omega = torch.stack([angular[i] for i in feet], -2).unsqueeze(-2)
-        speed = torch.stack([velocities[i] for i in feet], -2).unsqueeze(-2) + torch.cross(omega, displacement, dim=-1)
-        return points.flatten(-3, -2), speed.flatten(-3, -2)
-
-    def forward(self, p, R, v, w, q, qd):
-        """返回世界系髋4／膝4／足4位置和足4线速度，保留任意前置批次维度。
-
-        p/R/v/w 是根部世界位置、旋转、线速度与角速度；q/qd 为 JOINT_NAMES
-        顺序的真实关节角和速度。几何 buffer 与输入应在同一设备和精度。
-        """
-        positions, rotations, velocities, angular = self._body_kinematics(p, R, v, w, q, qd)
         feet, foot_velocities = [], []
         for index, parent in enumerate(self.site_parents):
             displacement = mv3(rotations[parent], self.site_offsets[index])

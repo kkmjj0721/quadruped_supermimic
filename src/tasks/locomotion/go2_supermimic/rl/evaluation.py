@@ -20,12 +20,6 @@ from .playback import make_playback
 def evaluate_policy(task_id: str, checkpoint: str | Path, *, branch="actor", device="cpu", num_envs=32,
                     seconds=20.0) -> dict:
     """固定四组命令；两分支均使用检查点配置、相同初始种子及播放历史维护。"""
-    if branch not in ("actor", "zero"):
-        raise ValueError("Evaluation branch must be actor or zero")
-    if num_envs < 4:
-        raise ValueError("Evaluation requires at least four environments for four command groups")
-    if not math.isfinite(seconds) or seconds <= 0:
-        raise ValueError("Evaluation duration must be positive and finite")
     checkpoint = Path(checkpoint).expanduser().resolve()
     env, actor = make_playback(task_id, checkpoint_file=checkpoint, num_envs=num_envs, device=device)
     try:

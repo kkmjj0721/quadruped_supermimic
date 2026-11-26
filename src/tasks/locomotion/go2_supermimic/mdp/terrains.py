@@ -19,7 +19,7 @@ from mjlab.terrains import TerrainEntityCfg, TerrainGeneratorCfg
 
 
 def reference_generator(cfg) -> TerrainGeneratorCfg:
-    """复用ri_5036_him地形，追加普通地形阶段的正反金字塔斜坡。"""
+    """复用ri_5036_him地形，追加PROOF普通地形阶段的正反金字塔斜坡。"""
     from mjlab.terrains import BoxRandomGridTerrainCfg
     from mjlab.terrains.config import ROUGH_TERRAINS_CFG
 
@@ -70,18 +70,14 @@ def clean_look(terrain):
 
 
 class TerrainMap:
-    """按任务地形集合分列，各行按生成器difficulty递增。"""
+    """十二种普通地形各占一列，六行按生成器difficulty递增。"""
 
     def __init__(self, cfg):
         self.cfg = deepcopy(cfg)
         self.plane = cfg.mode == "flat"
         self.size = tuple(cfg.patch_size_m)
-        if cfg.mode == "parkour":
-            from .parkour_terrains import parkour_generator
-            self.generator, self.family_names = parkour_generator(cfg)
-        else:
-            self.generator = None if self.plane else reference_generator(cfg)
-            self.family_names = ("flat",) if self.plane else tuple(self.generator.sub_terrains)
+        self.generator = None if self.plane else reference_generator(cfg)
+        self.family_names = ("flat",) if self.plane else tuple(self.generator.sub_terrains)
         weights = (1.,) if self.plane else tuple(term.proportion for term in self.generator.sub_terrains.values())
         total_weight = sum(weights)
         self.proportions = tuple(weight / total_weight for weight in weights)
@@ -99,8 +95,6 @@ class TerrainMap:
     def bind(self, origins):
         if self.plane:
             return
-        if tuple(origins.shape) != (self.rows, self.cols, 3) or not torch.isfinite(origins).all():
-            raise ValueError("Compiled terrain origins differ from the reference map")
         self.origins = origins.detach().clone()
 
     def spawn_origins(self, family_ids, levels):
@@ -115,13 +109,8 @@ class PlaneSurface:
         self.elevation = float(height)
         self.geometry_hash = hashlib.sha256(f"plane/{self.elevation}".encode()).hexdigest()
 
-    def contains(self, xy, margin=0.0):
-        return torch.isfinite(xy).all(dim=-1)
-
     def height(self, xy):
         return xy.sum(-1) * 0 + self.elevation
-
-    nearest_height = height
 
 
 class TerrainGeometry:
@@ -138,7 +127,6 @@ class TerrainGeometry:
         self.rows, self.cols = terrain_map.rows, terrain_map.cols
         self.size = torch.tensor(terrain_map.size, dtype=torch.float32, device=device)
         self.half_grid = self.size * self.size.new_tensor((self.rows, self.cols)) / 2
-        self.half_support = self.size.new_tensor(terrain_map.support_half_extent)
         data = mujoco.MjData(model)
         mujoco.mj_forward(model, data)
         terrain_ids = []
@@ -146,8 +134,6 @@ class TerrainGeometry:
             body = model.body(model.geom_bodyid[geom]).name
             if body == "terrain" or body.endswith("/terrain"):
                 terrain_ids.append(geom)
-        if not terrain_ids:
-            raise ValueError("Compiled model has no terrain collision geometry")
         bucket_count = self.rows * self.cols + 1
         boxes = [[] for _ in range(bucket_count)]
         fields = [None] * bucket_count
@@ -158,9 +144,6 @@ class TerrainGeometry:
         for geom in terrain_ids:
             kind = model.geom_type[geom]
             position = data.geom_xpos[geom].copy()
-            matrix = data.geom_xmat[geom].reshape(3, 3)
-            if not np.allclose(matrix, np.eye(3), atol=1e-6):
-                raise ValueError("Static terrain query only supports axis-aligned boxes and heightfields")
             dimensions = model.geom_size[geom].copy()
             digest.update(np.asarray([kind], dtype=np.int64).tobytes())
             digest.update(position.tobytes())
@@ -184,11 +167,7 @@ class TerrainGeometry:
                 digest.update(field_size.tobytes())
                 digest.update(heights.tobytes())
                 cell = np.floor((position[:2] + half) / terrain_map.size).astype(int)
-                if ((cell < 0) | (cell >= (self.rows, self.cols))).any():
-                    raise ValueError("Heightfield centre lies outside the terrain map")
                 bucket = cell[0] * self.cols + cell[1]
-                if fields[bucket] is not None:
-                    raise ValueError("Each terrain tile must contain at most one heightfield")
                 fields[bucket] = (position, field_size, nrow, ncol, heights)
             else:
                 raise ValueError(f"Unsupported terrain collision geometry: {kind}")
@@ -220,9 +199,6 @@ class TerrainGeometry:
         self.field_shapes = torch.from_numpy(field_rows).to(device)
         self.field_present = torch.from_numpy(field_present).to(device)
         return self
-
-    def contains(self, xy, margin=0.0):
-        return torch.isfinite(xy).all(-1) & (xy.abs() <= self.half_support - margin).all(-1)
 
     def rasterize(self, xs, ys):
         """按轴对齐碰撞几何填充来源射线栅格，不逐点广播全部箱体。"""
@@ -265,17 +241,15 @@ class TerrainGeometry:
         return info[4] + info[5] * value
 
     def height(self, xy):
-        """按碰撞几何查询地块高度，未覆盖处返回负无穷。"""
+        """按地块查询碰撞高度，保留位置梯度。"""
         shape = xy.shape[:-1]
         points = xy.reshape(-1, 2)
-        if points.shape[0] == 0:
-            return points.sum(-1).reshape(shape)
-        # 分块限制箱体临时张量，保持查询的数值和位置梯度。
+        # 分块限制箱体临时张量，保持高度数值和位置梯度。
         result = torch.cat([self._height_points(chunk) for chunk in points.split(self.QUERY_CHUNK_SIZE)], dim=0)
         return result.reshape(shape)
 
     def _height_points(self, points):
-        """用张量运算查询一批平面坐标。"""
+        """计算一块平面坐标对应的箱体与高度场表面。"""
         cell = torch.floor((points + self.half_grid) / self.size).long()
         in_grid = ((cell >= 0) & (cell < cell.new_tensor((self.rows, self.cols)))).all(-1)
         bucket = torch.where(in_grid, cell[:, 0] * self.cols + cell[:, 1], self.rows * self.cols)
@@ -314,9 +288,6 @@ class TerrainSurface:
         self = cls()
         self.device = torch.device(device)
         cfg = terrain_map.cfg
-        if cfg.mode == "parkour":
-            from .parkour_terrains import ParkourSurface
-            return ParkourSurface.from_model(model, device, terrain_map)
         origins = terrain_map.origins.reshape(-1, 3).cpu().numpy()
         self.origin = (float(origins[:, 0].min() - cfg.field_half_m), float(origins[:, 1].min() - cfg.field_half_m))
         upper = (float(origins[:, 0].max() + cfg.field_half_m), float(origins[:, 1].max() + cfg.field_half_m))
@@ -336,17 +307,6 @@ class TerrainSurface:
         torch.save({"h": heights, "origin": self.origin, "res": self.res}, path)
         self.h = heights.to(self.device)
         return self
-
-    def contains(self, xy, margin=0.0):
-        """来源高度图对所有有限坐标有效，域外取边缘值。"""
-        return torch.isfinite(xy).all(-1)
-
-    def nearest_height(self, xy):
-        """读取最近的原始栅格节点，用于保留桩边的支撑阶跃。"""
-        gx = ((xy[..., 0] - self.origin[0]) / self.res).round().long()
-        gy = ((xy[..., 1] - self.origin[1]) / self.res).round().long()
-        height, width = self.h.shape
-        return self.h[gy.clamp(0, height - 1), gx.clamp(0, width - 1)]
 
     def height(self, xy):
         gx = (xy[..., 0] - self.origin[0]) / self.res

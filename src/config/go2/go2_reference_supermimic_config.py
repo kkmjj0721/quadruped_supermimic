@@ -65,7 +65,7 @@ class Go2ReferenceCfg(BaseConfig):
         collect_det_frac: float = 0.25  # 各地形按比例分配无额外动作探索噪声的环境。
 
         # ---------- 编译与回滚 ----------
-        compile_imagination: bool = True  # 编译想象单步、采集张量、完整lambda-return与critic损失。
+        compile_imagination: bool = True  # 编译想象单步、完整lambda-return与critic损失。
         compile_backend: str = "inductor"
         collapse_falls: float = 3.0
         collapse_interval: int = 50
@@ -87,7 +87,7 @@ class Go2ReferenceCfg(BaseConfig):
         heightmap_dim = 162
 
     class teacher:
-        """普通地形回合级高程latent遮蔽；平地始终开启高程。"""
+        """官方普通地形回合级高程latent遮蔽；平地家族保持未遮蔽。"""
 
         exteroceptive_dropout = 0.4
 
@@ -143,7 +143,7 @@ class Go2ReferenceCfg(BaseConfig):
         metric_interval = 10  # 设备端汇总展示指标，每10轮回读并写TensorBoard。
         imag_microbatch = 4096
         critic_microbatch = 32768
-        wm_compile = True  # 编译可复用单步监督核，八步自回归留在外层。
+        wm_compile = True  # 编译完整八步监督及损失。
         fused_adam = True
         cuda_graph = True  # CUDA默认捕获模型、actor和critic更新；CPU使用原执行方式。
         detailed_timing = False  # 可显式开启图外采样／更新细分，原有阶段计时继续保留。
@@ -191,11 +191,11 @@ class Go2ReferenceCfg(BaseConfig):
         enable_self_collision = True
 
     class init_state:
-        pos = [0.0, 0.0, 0.29]
+        pos = [0.0, 0.0, 0.4]
         default_joint = {
             **{f"{leg}_hip_joint": 0.1 if leg in ("FL", "RL") else -0.1 for leg in ("FL", "FR", "RL", "RR")},
-            **{f"{leg}_thigh_joint": 0.9 for leg in ("FL", "FR", "RL", "RR")},
-            **{f"{leg}_calf_joint": -1.8 for leg in ("FL", "FR", "RL", "RR")},
+            **{f"{leg}_thigh_joint": 0.8 if leg in ("FL", "FR") else 1.0 for leg in ("FL", "FR", "RL", "RR")},
+            **{f"{leg}_calf_joint": -1.5 for leg in ("FL", "FR", "RL", "RR")},
         }
 
     class terrain:
@@ -246,14 +246,14 @@ class Go2ReferenceCfg(BaseConfig):
         rel_forward_envs = 0.05
 
     class reward:
-        """PROOF普通地形配方复用main站立平方项、pose及关节速度／滑移项，各项乘一次控制周期。"""
+        """PROOF普通地形配方追加main的站立关节速度与滑移项，各项乘一次控制周期。"""
 
         tracking_linear_variance = 0.25
         tracking_angular_variance = 0.25
-        pose_tracking_gate = True  # main：移动时按实际速度跟踪门控，站立保留原姿态分。
         fall_angle = 1.5
+        fall_softness_deg = 5.0  # 保留SuperMimic已有的想象倾角软失败。
+        base_contact_threshold = 5.0
         command_threshold = 0.1
-        stuck_velocity_threshold = 0.1  # PROOF：平移命令高于阈值而body水平速度低于阈值时惩罚。
         stand_still_command_threshold = 0.1  # main：命令平移模长加偏航绝对值不超过阈值时启用。
         foot_slip_command_threshold = 0.1  # main：命令平移模长加偏航绝对值超过阈值时启用。
         contact_force_threshold = 1.0
@@ -267,22 +267,12 @@ class Go2ReferenceCfg(BaseConfig):
         feet_air_time_threshold = 0.5
         contact_time_variance_clip = 0.5
 
-        class posture:
-            walking_threshold = 0.1
-            running_threshold = 1.5
-            std_standing = {"hip": 0.05, "thigh": 0.1, "calf": 0.15}
-            std_walking = {"hip": 0.15, "thigh": 0.35, "calf": 0.5}
-            std_running = {"hip": 0.15, "thigh": 0.35, "calf": 0.5}
-
         class scales:
             track_lin_vel_xy_exp = 1.5
             track_ang_vel_z_exp = 1.0
             lin_vel_z_l2 = -1.0
             ang_vel_xy_l2 = -0.05
-            body_orientation_l2 = -0.1
-            stuck = -2.0
-            stand_still = -2.0  # main：站立关节偏差平方和，保留当前分量门控。
-            pose = 0.3
+            stand_still = -1.0
             stand_still_joint_vel_l2 = -0.1
             foot_slip = -0.1
             joint_hip_deviation_l2 = -0.2
@@ -299,4 +289,4 @@ class Go2ReferenceCfg(BaseConfig):
             feet_stumble = -1.0
             feet_slide = -2.5e-2
             is_alive = 0.1
-            termination_penalty = -50.0
+            termination_penalty = -100.0

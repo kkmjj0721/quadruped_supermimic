@@ -37,51 +37,62 @@ _SCALAR_GROUPS = {
 
 def format_training_log(metrics: dict[str, int | float], *, num_envs: int, device) -> str:
     """按Go2 HIM的80列单块样式显示训练摘要和实时奖励率。"""
+    values = metrics
+
     def number(key: str, *, decimals: int = 4, count: bool = False) -> str:
-        return f"{metrics[key]:.0f}" if count else f"{metrics[key]:.{decimals}f}"
+        return f"{values[key]:.0f}" if count else f"{values[key]:.{decimals}f}"
 
     def duration(key: str) -> str:
-        return str(timedelta(seconds=int(max(0, metrics[key]))))
+        return str(timedelta(seconds=int(max(0, values[key]))))
 
     def row(label: str, value: str) -> str:
         return f"{label + ':':>40} {value}"
 
-    progress = f"{metrics['iteration']}/{metrics['training_target_iteration']}"
-    learning_time = metrics["timing/world_model_seconds"] + metrics["timing/control_seconds"]
+    iteration = number("iteration", count=True)
+    target = number("training_target_iteration", count=True)
+    progress = f"{iteration}/{target}"
+    control_available = metrics["control_enabled"] != 0
+    learning_keys = ("timing/world_model_seconds", "timing/control_seconds")
+    learning_time = f"{sum(values[key] for key in learning_keys):.3f}s"
+    collection_time = number("timing/collection_seconds", decimals=3) + "s"
     lines = ["#" * 80, f" Learning iteration {progress} ".center(80), "",
              row("Total steps", number("real_steps", count=True)),
              row("Steps per second", number("performance/real_total_fps", count=True)),
-             row("Collection time", number("timing/collection_seconds", decimals=3) + "s"),
-             row("Learning time", f"{learning_time:.3f}s")]
-    if metrics["control_enabled"] == 0:
+             row("Collection time", collection_time), row("Learning time", learning_time)]
+    if not control_available:
         lines.append(row("Training phase", "world-model only"))
-    lines.append(row("Mean world model loss", number("wm_loss")))
-    for label, key in (
-        ("Mean value loss", "critic_loss"), ("Mean control loss", "control_loss"),
-        ("Mean velocity estimation loss", "velocity_loss"), ("Mean total actor loss", "actor_loss"),
+    for label, key, available in (
+        ("Mean world model loss", "wm_loss", True),
+        ("Mean value loss", "critic_loss", control_available),
+        ("Mean control loss", "control_loss", control_available),
+        ("Mean velocity estimation loss", "velocity_loss", control_available),
+        ("Mean total actor loss", "actor_loss", control_available),
     ):
-        if key in metrics:
+        if available and (key == "wm_loss" or key in values):
             lines.append(row(label, number(key)))
-    lines.append(row("Control learning rate", f"{metrics['control_learning_rate']:.2e}"))
+    lines.append(row("Control learning rate", f"{values['control_learning_rate']:.2e}"))
     for label, key in (("Mean reward", "episode/return_mean"), ("Mean episode length", "episode/length_steps_mean")):
-        if key in metrics:
+        if key in values:
             lines.append(row(label, number(key, decimals=2)))
-    lines.extend([row("Metrics/failures", number("failures", count=True)),
-                  row("Metrics/timeouts", number("timeouts", count=True))])
-    if "task/terrain_level" in metrics:
-        lines.append(row("Metrics/terrain_level", number("task/terrain_level")))
+    for label, key, count in (
+        ("Metrics/failures", "failures", True), ("Metrics/timeouts", "timeouts", True),
+        ("Metrics/terrain_level", "task/terrain_level", False),
+    ):
+        if count or key in values:
+            lines.append(row(label, number(key, count=count)))
     for label, key in (("Metrics/linear_velocity_rmse", "task/tracking_linear_mse"),
                        ("Metrics/yaw_rate_rmse", "task/tracking_angular_mse")):
-        if key in metrics:
-            lines.append(row(label, f"{math.sqrt(max(0, metrics[key])):.4f}"))
-    if "task/action_rms" in metrics:
+        if key in values:
+            lines.append(row(label, f"{math.sqrt(max(0, values[key])):.4f}"))
+    if "task/action_rms" in values:
         lines.append(row("Metrics/action_rms", number("task/action_rms")))
-    if "velocity_rmse" in metrics:
+    if "velocity_rmse" in values:
         lines.append(row("Metrics/velocity_estimation_rmse", number("velocity_rmse")))
-    for key in metrics:
+    for key in values:
         if key.startswith("Reward_Rate/"):
             lines.append(row(key, number(key)))
-    lines.extend(["-" * 80, row("Iteration time", number("timing/iteration_seconds", decimals=2) + "s"),
+    iteration_time = number("timing/iteration_seconds", decimals=2) + "s"
+    lines.extend(["-" * 80, row("Iteration time", iteration_time),
                   row("Time elapsed", duration("timing/session_elapsed_seconds")),
                   row("ETA", duration("timing/eta_seconds")), ""])
     return "\n".join(lines)
@@ -110,24 +121,26 @@ class TrainingLogger:
             self._writer.add_text(tag, text, 0)
 
     def record(self, metrics: dict[str, int | float], *, force: bool = False) -> None:
-        iteration = metrics["iteration"]
-        target = metrics["training_target_iteration"]
+        values = metrics
+        iteration = values["iteration"]
+        target = values["training_target_iteration"]
         self._records += 1
         if self._writer is not None:
-            seconds = int(metrics["timing/session_elapsed_seconds"])
-            for name, value in metrics.items():
+            for name, value in values.items():
                 self._writer.add_scalar(name, value, iteration)
                 if name in _SCALAR_GROUPS:
                     self._writer.add_scalar(_SCALAR_GROUPS[name], value, iteration)
             for source, tag in (("task/tracking_linear_mse", "Metrics/tracking/linear_velocity_rmse"),
                                 ("task/tracking_angular_mse", "Metrics/tracking/yaw_rate_rmse")):
-                if source in metrics:
-                    self._writer.add_scalar(tag, math.sqrt(max(0, metrics[source])), iteration)
-            for source in ("episode/return_mean", "episode/length_steps_mean"):
-                if source in metrics:
-                    self._writer.add_scalar(_SCALAR_GROUPS[source] + "/time", metrics[source], seconds)
+                if source in values:
+                    self._writer.add_scalar(tag, math.sqrt(max(0, values[source])), iteration)
+            if "timing/session_elapsed_seconds" in values:
+                seconds = int(values["timing/session_elapsed_seconds"])
+                for source in ("episode/return_mean", "episode/length_steps_mean"):
+                    if source in values:
+                        self._writer.add_scalar(_SCALAR_GROUPS[source] + "/time", values[source], seconds)
         if force or self._records == 1 or iteration % self.log_interval == 0 or iteration == target:
-            print(format_training_log(metrics, num_envs=self.num_envs, device=self.device), flush=True)
+            print(format_training_log(values, num_envs=self.num_envs, device=self.device), flush=True)
 
     def close(self) -> None:
         if self._writer is not None:

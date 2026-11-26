@@ -46,14 +46,14 @@ class ObservationNorm(RunningNorm):
     """采用Z_RL的零初始计数及总体标准差加1e-2，不裁剪观测。"""
 
     def __init__(self, width: int):
-        super().__init__(width, epsilon=1e-2)
+        super().__init__(width)
         self.count.zero_()
 
     def forward(self, values: Tensor) -> Tensor:
-        return (values - self.mean) * self.inv_std
+        return (values - self.mean) / (self.var.sqrt() + 1e-2)
 
     def unnormalize(self, values: Tensor) -> Tensor:
-        return values * self.std + self.mean
+        return values * (self.var.sqrt() + 1e-2) + self.mean
 
 
 # ---------- 教师策略 ----------
@@ -77,14 +77,10 @@ class ProofTeacherActor(nn.Module):
         self.encoder_history_order = "term_major_oldest_first"
         self.input_order = "proprioceptive_latent_normalized_current_frame_masked_height_latent"
         self.actor_input_dim = self.prop_latent_dim + self.observation_dim + self.height_latent_dim
-        history_indices, current_indices, offset, column = [], [], 0, 0
+        current_indices, offset = [], 0
         for width in self.observation_term_dims:
-            history_indices.extend(step * self.observation_dim + index
-                                   for step in range(self.history_length) for index in range(column, column + width))
             current_indices.extend(range(offset + (self.history_length - 1) * width, offset + self.history_length * width))
             offset += self.history_length * width
-            column += width
-        self.register_buffer("history_indices", torch.tensor(history_indices, dtype=torch.long), persistent=False)
         self.register_buffer("current_frame_indices", torch.tensor(current_indices, dtype=torch.long))
         self.normalizer = ObservationNorm(self.observation_dim * self.history_length)
         self.prop_encoder = Mlp([self.observation_dim * self.history_length, *self.prop_encoder_hidden,
@@ -100,7 +96,8 @@ class ProofTeacherActor(nn.Module):
 
     def flatten_history(self, history: Tensor) -> Tensor:
         """外部逐帧历史转为作者逐观测项旧到新的450维编码布局。"""
-        return history.reshape(-1, self.history_length * self.observation_dim).index_select(-1, self.history_indices)
+        framed = history.reshape(-1, self.history_length, self.observation_dim)
+        return torch.cat([term.flatten(1) for term in framed.split(self.observation_term_dims, dim=-1)], dim=-1)
 
     @torch.no_grad()
     def update_statistics(self, history: Tensor):
@@ -113,18 +110,13 @@ class ProofTeacherActor(nn.Module):
         latent = self.prop_encoder(self.normalizer(self.flatten_history(history)))
         return latent, latent[:, :self.velocity_dim]
 
-    def action_and_velocity(self, history: Tensor, heightmap: Tensor, mask: Tensor) -> tuple[Tensor, Tensor]:
-        """动作与速度共享本体编码，当前帧来自同一归一化历史。"""
+    def forward(self, history: Tensor, heightmap: Tensor, mask: Tensor) -> Tensor:
+        """当前帧从同一归一化历史取出，高程latent经tanh后再乘mask。"""
         normalized = self.normalizer(self.flatten_history(history))
         latent = self.prop_encoder(normalized)
         current = normalized.index_select(-1, self.current_frame_indices)
         height = self.height_encoder(heightmap).tanh() * mask
-        action = self.actor(torch.cat((latent, current, height), -1))
-        return action, latent[:, :self.velocity_dim]
-
-    def forward(self, history: Tensor, heightmap: Tensor, mask: Tensor) -> Tensor:
-        """高程latent经tanh后再乘mask，部署仍保持原三输入动作接口。"""
-        return self.action_and_velocity(history, heightmap, mask)[0]
+        return self.actor(torch.cat((latent, current, height), -1))
 
 
 # ---------- 装配与价值网络 ----------

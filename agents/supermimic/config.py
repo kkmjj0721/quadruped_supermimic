@@ -16,12 +16,12 @@ class ExecutionConfig:
 
     imag_microbatch: int = 4096
     critic_microbatch: int = 32768
-    wm_compile: bool = True  # 复用单步监督核，外层自回归保持原顺序。
+    wm_compile: bool = True  # 完整自回归监督及损失。
     fused_adam: bool = True
     cuda_graph: bool = True  # CUDA捕获采样与更新，融合指标累计；CPU运行需显式关闭。
     detailed_timing: bool = False  # 图外记录阶段事件，原有计时指标保持原义。
     timing_interval: int = 1  # 详细计时的采样轮数间隔；首次使用和图准备轮强制记录。
-    metric_interval: int = 10  # 设备指标汇总及TensorBoard写入间隔；护栏和learn返回强制完成窗口。
+    metric_interval: int = 1  # 设备指标汇总及TensorBoard写入间隔；护栏和learn返回强制完成窗口。
     replay_history_storage: str = "frames"  # 默认只保存实际带噪单帧；full保留完整历史作显式对照。
     wm_bf16: bool = False  # 仅世界模型MLP使用CUDA BF16；监督和想象共享该边界。
     actor_bf16: bool = False  # 策略MLP使用CUDA BF16；潜变量融合与观测归一化保留FP32。
@@ -66,7 +66,7 @@ class SuperMimicConfig:
     critic_minibatches: int = 4
     grad_clip: float = 1.0
     grad_clip_element: float = 0.1
-    compile_imagination: bool = True  # 想象单步、采集张量、完整lambda-return及critic损失。
+    compile_imagination: bool = True  # 想象单步、完整lambda-return及critic损失。
     compile_backend: str = "inductor"
     # 论文表A.5：仅真实采集时逐步逐维独立添加固定高斯噪声，单位为动作缩放前单位。
     action_noise: float = 0.1

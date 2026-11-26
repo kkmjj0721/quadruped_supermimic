@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 import mjlab
@@ -23,4 +24,8 @@ def train_main(task_id: str, arguments: list[str]) -> None:
     args = tyro.cli(
         SuperMimicTrainConfig, args=arguments, prog=f"{sys.argv[0]} {task_id}", config=mjlab.TYRO_FLAGS,
     )
+    if int(os.environ.get("WORLD_SIZE", "1")) != 1:
+        raise ValueError("Distributed SuperMimic training is not supported; WORLD_SIZE must be 1")
+    if args.resume is None and (args.continue_run or args.reset_critic):
+        raise ValueError("continue_run and reset_critic require a resume checkpoint")
     training.launch_training(task_id, args)

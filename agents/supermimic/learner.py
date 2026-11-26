@@ -31,9 +31,9 @@ def clip_gradients(parameters, norm: float, element: float | None = None):
     parameters = list(parameters)
     value = nn.utils.clip_grad_norm_(parameters, norm)
     if element is not None:
-        gradients = [parameter.grad for parameter in parameters]
-        torch._foreach_clamp_min_(gradients, -element)
-        torch._foreach_clamp_max_(gradients, element)
+        for parameter in parameters:
+            if parameter.grad is not None:
+                parameter.grad.clamp_(-element, element)
     return value
 
 
@@ -126,8 +126,12 @@ class Learner:
         return {"wm_loss": loss.detach(), "wm_grad_norm": gradient.detach(),
                 "wm_valid_steps": window.valid.sum()}
 
-    def _critic_loss(self, normalized_features, targets):
-        return (self.critic.net(normalized_features).squeeze(-1) - targets).square().mean()
+    def _critic_loss(self, features, targets):
+        return (self.critic(features) - targets).square().mean()
+
+    def timing_setup_pending(self, *, control_enabled=False, freeze_actor=False):
+        """普通执行没有独立的Graph预热／捕获阶段。"""
+        return False
 
     def _fit_critic(self, features, targets, *, timing=None):
         """以固定想象目标拟合价值网络，保留尾批与分批累积语义。"""
@@ -135,7 +139,6 @@ class Learner:
         critic, optimizer = self.critic, self.critic_optimizer
         with timing.section("critic_prepare") if timing is not None else nullcontext():
             critic.normalizer.update(features)
-            normalized_features = critic.normalizer(features)
             losses = []
             minibatch = features.shape[0] // cfg.critic_minibatches
         with timing.section("critic_update") if timing is not None else nullcontext():
@@ -147,7 +150,7 @@ class Learner:
                     optimizer.zero_grad(set_to_none=True)
                     value_loss = features.new_zeros(())
                     for part in selected.split(self.execution.critic_microbatch):
-                        partial_loss = self.critic_loss_kernel(normalized_features[part], targets[part])
+                        partial_loss = self.critic_loss_kernel(features[part], targets[part])
                         weighted_loss = partial_loss * (part.numel() / selected.numel())
                         weighted_loss.backward()
                         value_loss += weighted_loss.detach()
@@ -173,7 +176,7 @@ class Learner:
                     data = self.imagination.rollout(part)
                     targets = self.imagination.lambda_returns(data)
                     control_loss = -data.objective.mean()
-                    velocity = data.initial_velocity
+                    _, velocity = self.actor.encode(part.history)
                     target_velocity = self.task.body_linear_velocity(part.state).detach()
                     velocity_error = (velocity - target_velocity).square()
                     velocity_loss = velocity_error.mean()
@@ -185,7 +188,6 @@ class Learner:
                     values = {"control_loss": control_loss.detach(), "velocity_loss": velocity_loss.detach(),
                               "actor_loss": loss.detach(),
                               "imagination/survival_h": data.survival.detach().mean(),
-                              "imagination/unsupported_touchdown_fraction": data.unsupported_touchdowns.float().mean(),
                               "imagination/discounted_reward": data.discounted_reward.detach().mean(),
                               "imagination/bootstrap": data.bootstrap.detach().mean(),
                               "imagination/reward": data.rewards.mean()}

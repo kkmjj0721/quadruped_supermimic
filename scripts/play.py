@@ -101,9 +101,9 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
     configure_torch_backends()
     device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    from src.tasks.locomotion.go2_supermimic.rl.playback import make_playback
+    from src.tasks.locomotion.go2_supermimic.rl.playback import make_playback_env
 
-    env, policy = make_playback(
+    env, policy = make_playback_env(
         task_id, checkpoint_file=checkpoint, agent=cfg.agent, num_envs=cfg.num_envs, device=device,
         video=cfg.video, video_length=cfg.video_length, video_height=cfg.video_height,
         video_width=cfg.video_width, no_terminations=cfg.no_terminations,
