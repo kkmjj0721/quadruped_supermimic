@@ -243,7 +243,7 @@ class Go2ReferenceCfg(BaseConfig):
         rel_forward_envs = 0.05
 
     class reward:
-        """PROOF普通地形配方追加main的站立关节速度与滑移项，各项乘一次控制周期。"""
+        """PROOF普通地形配方追加main的倾斜、站立关节速度与滑移项，各项乘一次控制周期。"""
 
         tracking_linear_variance = 0.25
         tracking_angular_variance = 0.25
@@ -269,6 +269,7 @@ class Go2ReferenceCfg(BaseConfig):
             track_ang_vel_z_exp = 1.0
             lin_vel_z_l2 = -1.0
             ang_vel_xy_l2 = -0.05
+            body_orientation_l2 = -0.1
             stand_still = -1.0
             stand_still_joint_vel_l2 = -0.1
             foot_slip = -0.1
