@@ -18,6 +18,7 @@ from mjlab.utils.torch import configure_torch_backends
 from agents.supermimic.config import ExecutionConfig, RUNNER_RUNTIME_FIELDS
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 from src.config.go2.go2_parkour_config import parkour_config
+from src.runtime import configure_cuda_libdevice
 
 from ..config.loading import load_task_config
 from ..config.train_cfg import SuperMimicTrainConfig, TASK_MODES
@@ -68,6 +69,8 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
     cfg, resume, source = _resolve_task_config(task_id, args)
     runtime = cfg.runner
     device = args.device
+    if torch.device(device).type == "cuda":
+        configure_cuda_libdevice()
     log_root = (Path(args.log_root).expanduser() / args.experiment_name).resolve()
     if cfg.terrain.mode == "parkour":
         log_root = log_root / "parkour"

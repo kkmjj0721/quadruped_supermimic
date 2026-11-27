@@ -47,6 +47,20 @@ uv run --no-sync python -B tools/check_install.py --help
 
 `cpu` 与 `cu130` 是互斥的可选依赖组。日常命令使用 `uv run --no-sync`，避免未指定后端的自动同步改变环境。手动同步时带上后端，例如 `uv sync --locked --extra cu130`。
 
+## CUDA 编译数学库路径
+
+训练启用 `torch.compile` 时，PyTorch 会查找 CUDA Toolkit 的 `libdevice.10.bc`。机器同时安装多套 Toolkit，且 PATH 首先找到 `/usr/bin/nvcc` 时，自动推导的 CUDA 根目录可能是 `/usr`，从而出现查找 `/usr/nvvm/libdevice/libdevice.10.bc` 失败的警告。
+
+CUDA 训练入口会在创建 runner 前设置 `TRITON_LIBDEVICE_PATH`，默认使用 `/usr/local/cuda/nvvm/libdevice/libdevice.10.bc` 并解析符号链接，避免依赖 PATH 中的 `nvcc`。已有显式设置时保持原值。编译训练需要该数学库；路径无效时由编译器直接报错，不静默改用其他数学库。
+
+Toolkit 不在默认目录或需要固定版本时，在启动训练的 shell 中显式指定路径。例如 Toolkit 安装在 `/usr/local/cuda-13.0` 时：
+
+```bash
+export TRITON_LIBDEVICE_PATH=/usr/local/cuda-13.0/nvvm/libdevice/libdevice.10.bc
+```
+
+需要在后续交互式 SSH 会话中固定使用该版本时，将该行加入 `~/.bashrc`，然后重新登录；已有终端需先执行该行。非交互式作业应在作业启动脚本中设置该变量。已启动的训练进程不会获得后续的环境变量修改。
+
 ## 多源测速与慢网安装
 
 默认分别比较三类下载通道，避免普通包索引很快、PyTorch 大包仍然很慢：
