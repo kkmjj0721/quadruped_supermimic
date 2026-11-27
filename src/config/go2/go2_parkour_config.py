@@ -75,7 +75,7 @@ def parkour_config(source: Go2ReferenceCfg) -> Go2ReferenceCfg:
     cfg.domain_randomization.pd_gain_range = (0.9, 1.1)
     cfg.domain_randomization.joint_friction_range = (0.0, 0.2)
     cfg.domain_randomization.joint_armature_range = (0.0, 0.01)
-    cfg.domain_randomization.joint_parameter_mode = "reset"
+    cfg.domain_randomization.joint_parameter_mode = "startup"
     cfg.domain_randomization.push_enabled = True
     cfg.domain_randomization.push_interval_s = 10.0
     cfg.domain_randomization.push_velocity_range = {"x": (-0.5, 0.5), "y": (-0.5, 0.5)}

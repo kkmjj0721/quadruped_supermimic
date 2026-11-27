@@ -232,7 +232,7 @@ class Go2ReferenceCfg(BaseConfig):
         pd_gain_range = (0.9, 1.1)
         joint_friction_range = (0.0, 0.2)
         joint_armature_range = (0.0, 0.01)
-        joint_parameter_mode = "reset"
+        joint_parameter_mode = "startup"
         push_enabled = False
         push_interval_s = 10.0
         push_velocity_range = {"x": (-0.5, 0.5), "y": (-0.5, 0.5)}
