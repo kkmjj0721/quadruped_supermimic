@@ -226,6 +226,7 @@ class ParkourSurface(TerrainSurface):
         for cell, indices in candidates.items():
             table[cell][:len(indices)] = np.asarray(indices) + 1
         self.surface_ids = torch.from_numpy(table).to(self.device)
+        self.surface_counts = (self.surface_ids != 0).sum(-1)
         self.bounds = torch.tensor(np.vstack((np.array([0., 0., 1., 1.]), boxes)), dtype=torch.float64, device=self.device)
         self.flat_top = torch.tensor([0, *top], dtype=torch.float32, device=self.device)
         self.field_layout = torch.tensor([[0, 2, 2], *zip(addresses, heights, widths, strict=True)],
@@ -235,6 +236,14 @@ class ParkourSurface(TerrainSurface):
     @torch.no_grad()
     def collision_height(self, xy):
         """按所在空间格查询实际碰撞高度，保留沟边与高台的真实位置。"""
+        if self.device.type == "cuda":
+            from .parkour_surface_kernel import parkour_collision_height_fp64
+
+            return parkour_collision_height_fp64(
+                xy, self.surface_half, self.surface_ids, self.surface_counts, self.bounds, self.flat_top,
+                self.field_layout, self.field_values, self.triangle_ids, self.triangle_counts, self.triangle_origin,
+                self.triangle_w0, self.triangle_w1, self.triangle_z, self.surface_cell, self.triangle_cell,
+            )
         # 全局坐标绝对值可达 80 m；几何判定保留双精度，避免吞掉微米实体重叠。
         points = xy.to(dtype=torch.float64)
         rectangle_height, covered = self._rectangle_height(points)
@@ -281,6 +290,7 @@ class ParkourSurface(TerrainSurface):
         for cell, indices in cells.items():
             ids[cell][:len(indices)] = indices
         self.triangle_ids = torch.from_numpy(ids).to(self.device)
+        self.triangle_counts = (self.triangle_ids != 0).sum(-1)
         # 空槽是有非零投影面积的占位三角形；用 id 掩码表达空集合。
         empty = np.array([[[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]]])
         values = torch.as_tensor(np.concatenate((empty, triangles)), dtype=torch.float64, device=self.device)

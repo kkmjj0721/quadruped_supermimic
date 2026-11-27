@@ -74,7 +74,7 @@ def reference_reward_terms(task, state, action, next_state, failure):
                           * next_state.memory[:, FIRST_CONTACT]).sum(-1) * moving,
         # ae910b8的where在parkour分支返回零，普通地形实际保留此项；方差沿用默认无偏估计。
         "feet_air_time_variance": (last_air_time.clamp(max=cfg.contact_time_variance_clip).var(dim=-1)
-                                   + last_contact_time.clamp(max=cfg.contact_time_variance_clip).var(dim=-1)),
+                                   + last_contact_time.clamp(max=cfg.contact_time_variance_clip).var(dim=-1)) * moving,
         "feet_stumble": physical[:, STUMBLE_EVENT].squeeze(-1),
         "feet_slide": (foot_speed * physical[:, FOOT_HISTORY_CONTACT]).sum(-1),
         "is_alive": 1 - failure,

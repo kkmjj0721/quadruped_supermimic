@@ -45,7 +45,7 @@ uv run --no-sync python scripts/play.py Unitree-Go2-SuperMimic-Rough \
 
 ## 二阶段 Parkour
 
-从普通粗糙地形权重热启动二阶段；Actor、Critic 和世界模型形状保持不变，任务上下文追加可回放的地形族号。默认使用预打包 `src/assets/terrains/proof_parkour_17.npz`，无 IsaacLab 运行依赖。
+从普通粗糙地形权重热启动二阶段；Actor、Critic 和世界模型形状保持不变，任务上下文追加可回放的地形族号。默认使用去除离散障碍的十族地图 `src/assets/terrains/proof_parkour_17.npz`，保持 10 行 × 20 列，无 IsaacLab 运行依赖。
 
 ```bash
 .venv/bin/python tools/build_proof_parkour_terrain.py --seed 17
@@ -55,9 +55,9 @@ uv run --no-sync python scripts/play.py Unitree-Go2-SuperMimic-Rough \
   --checkpoint-file '<Parkour实验目录>/model_10000.pt' --num-envs 20
 ```
 
-跨阶段 `--resume` 完整切换为官方 23 项二阶段奖励、按族命令、重置及随机化配置，继承来源算法和站姿；禁止跨阶段 `--continue-run True`，二阶段自身可续训。显式 `--task-config` 可使用普通地形配置，Parkour 入口会切换二阶段配方。`gap/climb/hurdle/stairs_inv_high_straight` 始终保留高程，其余七族以 40% 概率遮蔽；播放统一使用完整高程。日志位于实验目录下的 `parkour/`，按族记录课程等级。质量倍率采用 MjLab 原生对数均匀分布，MuJoCo 接触及质量／惯量映射差异见任务来源说明。
+跨阶段 `--resume` 完整切换为官方 23 项二阶段奖励、按族命令、重置及随机化配置，继承来源算法和站姿；禁止跨阶段 `--continue-run True`，二阶段自身可续训。显式 `--task-config` 可使用普通地形配置，Parkour 入口会切换二阶段配方。`gap/climb/hurdle/stairs_inv_high_straight` 始终保留高程，其余普通地形以 40% 概率遮蔽；播放统一使用完整高程。日志位于实验目录下的 `parkour/`，按族记录课程等级。质量倍率采用 MjLab 原生对数均匀分布，MuJoCo 接触及质量／惯量映射差异见任务来源说明。
 
-离线构建器支持 `--seed 42 --num-rows 4 --num-cols 6 --output <资产路径>`；训练配置 `terrain.asset_path` 指向新资产后（相对路径以项目根目录为基准，也可指定绝对路径），运行时按资产元数据装配布局。十一族参数与几何实现在 `tools/parkour_terrain/`。
+离线构建器只生成当前十族地形，默认输出与训练配置一致的资产路径；支持 `--seed 42 --num-rows 4 --num-cols 6 --output <资产路径>`。训练配置 `terrain.asset_path` 指向自定义资产后（相对路径以项目根目录为基准，也可指定绝对路径），运行时按资产元数据装配布局。参数与几何实现在 `tools/parkour_terrain/`。金字塔上、下阶梯各占两列，沟壑六列、攀爬四列，其余各一列。旧十一族地图已由当前地图替换，仅保留标准资产文件；已有快照若指向标准路径会直接读取当前地图，自定义资产路径仍按快照执行。
 
 ## 策略导出
 

@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：集中保留 proof-loco@ae910b8 的十一族基线参数与锐边裁剪区。"""
+"""内容：集中声明当前 Parkour 十族地形参数与锐边裁剪区。"""
 
 from types import SimpleNamespace
 
@@ -12,7 +12,8 @@ CROPS = {
 }
 
 
-def proof_ae910b8():
+def parkour_terrain_cfg():
+    """采用 PROOF ae910b8 参数并移除离散障碍，保留其余地形的相对权重。"""
     return SimpleNamespace(
         size=(8.0, 8.0),
         border_width=20.0,
@@ -95,25 +96,6 @@ def proof_ae910b8():
                 inverted=True,
                 proportion=0.05,
                 slope_range=(0.0, 0.45),
-                border_width=0.1,
-                size=(8.0, 8.0),
-                horizontal_scale=0.1,
-                vertical_scale=0.01,
-                slope_threshold=0.75,
-            ),
-            "discrete": SimpleNamespace(
-                function=generators.discrete_obstacles_terrain,
-                noise_range=(-0.05, 0.05),
-                noise_step=0.01,
-                downsampled_scale=0.2,
-                roughness_type="random",
-                roughness_strengths=(0.4, 0.7, 1.0),
-                apply_roughness=0.8,
-                center_platform_width=3.0,
-                proportion=0.05,
-                obstacle_width_range=(1.0, 2.0),
-                obstacle_height_range=(0.05, 0.2),
-                num_obstacles=20,
                 border_width=0.1,
                 size=(8.0, 8.0),
                 horizontal_scale=0.1,
@@ -238,6 +220,3 @@ def proof_ae910b8():
             ),
         },
     )
-
-
-PRESETS = {"proof_ae910b8": proof_ae910b8}

@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：组合 PROOF ae910b8 二阶段 Parkour 地形、命令、奖励与域随机化配置。"""
+"""内容：组合去除离散障碍的 PROOF 二阶段 Parkour 地形、命令、奖励与域随机化配置。"""
 
 from copy import deepcopy
 from math import pi

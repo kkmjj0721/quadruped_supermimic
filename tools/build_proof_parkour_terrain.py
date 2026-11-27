@@ -17,7 +17,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.parkour_terrain.packing import pack
-from tools.parkour_terrain.presets import PRESETS
+from tools.parkour_terrain.presets import parkour_terrain_cfg
 
 
 def main():
@@ -25,7 +25,6 @@ def main():
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--num-rows", type=int, default=10)
     parser.add_argument("--num-cols", type=int, default=20)
-    parser.add_argument("--preset", choices=tuple(PRESETS), default="proof_ae910b8")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     output = (
@@ -34,7 +33,7 @@ def main():
         else Path(__file__).resolve().parents[1] / f"src/assets/terrains/proof_parkour_{args.seed}.npz"
     )
     started = perf_counter()
-    data = pack(args.seed, PRESETS[args.preset](), args.num_rows, args.num_cols)
+    data = pack(args.seed, parkour_terrain_cfg(), args.num_rows, args.num_cols)
     output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(output, **data)
     print(f"Built terrain asset: {output} ({perf_counter() - started:.3f} seconds)", flush=True)

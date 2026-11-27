@@ -1,5 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：保留官方随机流的七类离线地形生成器。
+"""内容：保留来源随机流的六类离线地形生成器。
 
 来源：LocoLab@37e567d，许可证见 LICENSE_LocoLab。
 """
@@ -552,44 +552,3 @@ def pyramid_sloped_rough_terrain(difficulty, cfg):
 
 def _center_height(height_field):
     return int(np.rint(height_field[height_field.shape[0] // 2, height_field.shape[1] // 2]))
-
-
-@height_field_to_mesh
-def discrete_obstacles_terrain(difficulty, cfg):
-    obstacle_height = cfg.obstacle_height_range[0] + difficulty * (
-        cfg.obstacle_height_range[1] - cfg.obstacle_height_range[0]
-    )
-    width_pixels = int(cfg.size[0] / cfg.horizontal_scale)
-    length_pixels = int(cfg.size[1] / cfg.horizontal_scale)
-    obstacle_height = int(obstacle_height / cfg.vertical_scale)
-    obstacle_width_min = int(cfg.obstacle_width_range[0] / cfg.horizontal_scale)
-    obstacle_width_max = int(cfg.obstacle_width_range[1] / cfg.horizontal_scale)
-    center_platform_width = int(cfg.center_platform_width / cfg.horizontal_scale)
-    obstacle_width_range = np.arange(obstacle_width_min, obstacle_width_max + 1, 4)
-    obstacle_length_range = np.arange(obstacle_width_min, obstacle_width_max + 1, 4)
-    if len(obstacle_width_range) == 0:
-        obstacle_width_range = np.array([obstacle_width_min])
-    if len(obstacle_length_range) == 0:
-        obstacle_length_range = np.array([obstacle_width_min])
-    height_range = np.array(
-        [-obstacle_height, -obstacle_height // 2, obstacle_height // 2, obstacle_height], dtype=np.int16
-    )
-    hf_raw = np.zeros((width_pixels, length_pixels), dtype=np.int16)
-    for _ in range(cfg.num_obstacles):
-        width = int(np.random.choice(obstacle_width_range))
-        length = int(np.random.choice(obstacle_length_range))
-        width = min(width, width_pixels)
-        length = min(length, length_pixels)
-        x_start_range = np.arange(0, max(width_pixels - width, 0) + 1, 4)
-        y_start_range = np.arange(0, max(length_pixels - length, 0) + 1, 4)
-        x_start = int(np.random.choice(x_start_range))
-        y_start = int(np.random.choice(y_start_range))
-        hf_raw[x_start : x_start + width, y_start : y_start + length] = np.random.choice(height_range)
-    center_platform_width = min(center_platform_width, width_pixels, length_pixels)
-    x1 = (width_pixels - center_platform_width) // 2
-    x2 = (width_pixels + center_platform_width) // 2
-    y1 = (length_pixels - center_platform_width) // 2
-    y2 = (length_pixels + center_platform_width) // 2
-    hf_raw[x1:x2, y1:y2] = 0
-    hf_raw = _finalize_height_field(cfg, hf_raw, difficulty)
-    return _pack_height_field(np.rint(hf_raw).astype(np.int16), cfg, _center_height(hf_raw))

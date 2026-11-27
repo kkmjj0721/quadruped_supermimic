@@ -117,6 +117,8 @@ class SuperMimicRunner:
             self._model_training = CapturedUpdate(self._fit_models, self.device)
             self._policy_graph_generation = self.learner.graph_generation
             self._model_graph_generation = self.learner.model_graph_generation
+        self._collection_heightmap = (compile_kernel(self.task.actor_heightmap, self.config.compile_backend)
+                                      if self.execution.cuda_graph else self.task.actor_heightmap)
         self._collection_policy = (compile_kernel(self.actor, self.config.compile_backend)
                                    if self.execution.cuda_graph else self.actor)
         self._collection_update = (compile_kernel(self._advance_collection, self.config.compile_backend)
@@ -246,7 +248,7 @@ class SuperMimicRunner:
         reset_steps = torch.zeros((), dtype=torch.long, device=self.device)
         for _ in range(steps):
             observation = self.history[:, -1]
-            heightmap = self.task.actor_heightmap(self.current)
+            heightmap = self._collection_heightmap(self.current)
             mask = self.task.actor_mask(self.current)
             action = self._override_actions(self._collection_policy(self.history, heightmap, mask), self.history, observation)
             noise = cfg.action_noise * torch.randn_like(action)

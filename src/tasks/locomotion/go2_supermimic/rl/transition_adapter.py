@@ -14,6 +14,7 @@ from mjlab.envs import ManagerBasedRlEnv
 from agents.supermimic.compilation import compile_kernel
 from agents.supermimic.interfaces import EnvStep
 
+from .constant_graph import configure_reset_constant_graph
 from .mjlab_step import step_manual_reset
 from ..config.env_cfgs import resolve_go2_supermimic_cfg
 from ..go_supermimic_env_cfg import make_go2_supermimic_env_cfg
@@ -58,6 +59,7 @@ class Go2TransitionAdapter:
         if video_width is not None:
             env_cfg.viewer.width = video_width
         self.raw_env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
+        configure_reset_constant_graph(self.raw_env)
         if not self.play:
             self.raw_env.step = MethodType(step_manual_reset, self.raw_env)
         self.num_envs = self.raw_env.num_envs

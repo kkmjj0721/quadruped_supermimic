@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import sys
 from typing import Literal
@@ -29,7 +29,9 @@ import torch
 import tyro
 
 from mjlab.utils.torch import configure_torch_backends
-from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
+from mjlab.viewer import NativeMujocoViewer
+
+from src.tasks.locomotion.go2_supermimic.rl.viewer import SuperMimicViserPlayViewer
 
 
 @dataclass(frozen=True)
@@ -67,8 +69,12 @@ def run_viewer(env, policy, cfg: PlayConfig, device: str) -> None:
         has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
         viewer = "native" if has_display else "viser"
     print(f"[INFO] Playing with: device={device}, viewer={viewer}", flush=True)
-    viewer_cls = {"native": NativeMujocoViewer, "viser": ViserPlayViewer}[viewer]
-    viewer_cls(env, policy).run()
+    viewer_cls = {"native": NativeMujocoViewer, "viser": SuperMimicViserPlayViewer}[viewer]
+    play_viewer = viewer_cls(env, policy)
+    if viewer == "viser":
+        # MuJoCo 负俯仰角表示从上方看；Viser 用正角度把相机放在目标上方。
+        play_viewer.cfg = replace(play_viewer.cfg, elevation=-play_viewer.cfg.elevation)
+    play_viewer.run()
 
 
 def _resolve_checkpoint(cfg: PlayConfig) -> Path | None:

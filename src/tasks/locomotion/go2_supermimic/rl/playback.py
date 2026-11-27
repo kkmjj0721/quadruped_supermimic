@@ -13,6 +13,7 @@ from mjlab.managers.command_manager import NullCommandManager
 from mjlab.utils.wrappers import VideoRecorder
 
 from agents.supermimic.interfaces import append_history
+from src.runtime import configure_cuda_libdevice
 
 from ..config.train_cfg import TASK_MODES
 from .checkpoints import build_playback_policy, load_playback_source
@@ -217,6 +218,8 @@ def _restore_curriculum(adapter, checkpoint):
 def make_playback(task_id, *, checkpoint_file=None, agent="trained", num_envs=None, device="cpu",
                   render_mode=None, video_height=None, video_width=None, no_terminations=False):
     """返回已重置的播放环境与确定性高程教师策略，不创建训练组件。"""
+    if torch.device(device).type == "cuda":
+        configure_cuda_libdevice()
     task_mode = TASK_MODES[task_id]
     dummy_action = {"trained": None, "zero": torch.zeros, "random": torch.rand}[agent]
     source = load_playback_source(task_id, checkpoint_file) if agent == "trained" else None
