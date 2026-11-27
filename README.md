@@ -21,7 +21,7 @@ bash setup.sh --torch-backend cu130
 uv run --no-sync python -B tools/check_install.py --device cuda
 ```
 
-安装脚本直接调用 uv 准备 Python 和项目虚拟环境。CPU 安装与更多选项见 [安装指南](docs/setup.md)；日常运行保留 `--no-sync`，沿用已安装的后端。
+安装入口按镜像测速结果调用 uv 准备 Python 和项目虚拟环境。CPU 安装与更多选项见 [安装指南](docs/setup.md)；日常运行保留 `--no-sync`，沿用已安装的后端。
 
 ## 🧠 训练
 

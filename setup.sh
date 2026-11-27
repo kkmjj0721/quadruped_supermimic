@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Copyright (c) 2026-2027 zh
-# 内容：使用 uv 锁文件同步指定 PyTorch 后端的项目环境。
-# 用法：bash setup.sh [--torch-backend auto|cpu|cu130] [-- uv sync 参数]
+# 内容：测速并选择 Python、PyPI 和 PyTorch 镜像，同步锁定环境。
+# 用法：bash setup.sh [--torch-backend auto|cpu|cu130] [镜像／测速参数] [-- uv sync 参数]
 
 set -euo pipefail
 
 project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 torch_backend="auto"
+download_args=()
 sync_args=()
 
 while (($#)); do
@@ -19,14 +20,34 @@ while (($#)); do
       torch_backend="${1#*=}"
       shift
       ;;
+    --probe-only|--skip-probes)
+      download_args+=("$1")
+      shift
+      ;;
+    --python-mirror|--pypi-mirror|--torch-mirror|--probe-timeout|--probe-bytes|--download-timeout)
+      download_args+=("$1" "$2")
+      shift 2
+      ;;
+    --python-mirror=*|--pypi-mirror=*|--torch-mirror=*|--probe-timeout=*|--probe-bytes=*|--download-timeout=*)
+      download_args+=("$1")
+      shift
+      ;;
     -h|--help)
       cat <<'HELP'
-Usage: bash setup.sh [--torch-backend auto|cpu|cu130] [-- UV_SYNC_ARGS...]
+Usage: bash setup.sh [--torch-backend auto|cpu|cu130] [OPTIONS] [-- UV_SYNC_ARGS...]
 
-Run uv sync --locked --extra BACKEND in this project.
+Select download mirrors and synchronize the locked project environment.
+  --probe-only            Probe channels without installing project dependencies.
+  --skip-probes           Use the original locked download URLs.
+  --python-mirror ROOT    Python archive root (repeatable).
+  --pypi-mirror ROOT      PyPI artifact root including /packages (repeatable).
+  --torch-mirror ROOT     Torch artifact root preceding /cpu or /cu130 (repeatable).
+  --probe-timeout SEC     Probe budget per sample (default: 8).
+  --probe-bytes BYTES     Bytes per sample (default: 524288).
+  --download-timeout SEC  Seconds per installation attempt (default: 1800).
 Auto selects cu130 for CUDA Toolkit 13+ on PATH, otherwise cpu.
 Install uv first: https://docs.astral.sh/uv/getting-started/installation/
-Configure mirrors and proxies with uv's environment variables.
+Custom mirror lists replace the built-in candidates for that category.
 HELP
       exit 0
       ;;
@@ -54,4 +75,4 @@ if [[ "${torch_backend}" == "auto" ]]; then
 fi
 
 cd -- "${project_root}"
-exec uv sync --locked --extra "${torch_backend}" "${sync_args[@]}"
+exec python3 -B tools/setup_env.py --torch-backend "${torch_backend}" "${download_args[@]}" -- "${sync_args[@]}"

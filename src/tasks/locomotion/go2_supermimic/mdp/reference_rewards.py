@@ -56,7 +56,7 @@ def reference_reward_terms(task, state, action, next_state, failure):
         "lin_vel_z_l2": body_velocity[:, 2].square(),
         "ang_vel_xy_l2": angular_velocity[:, :2].square().sum(-1),
         "body_orientation_l2": physical[:, GRAVITY][:, :2].square().sum(-1),
-        "stand_still": joint_offset.norm(dim=-1) * ~moving,
+        "stand_still": joint_offset.square().sum(-1) * standing,
         "stand_still_joint_vel_l2": physical[:, JOINT_VELOCITY].square().sum(-1) * standing,
         "foot_slip": (foot_speed_squared * physical[:, CONTACT_FOUND]).sum(-1)
                      * (command_magnitude > cfg.foot_slip_command_threshold),
@@ -81,6 +81,7 @@ def reference_reward_terms(task, state, action, next_state, failure):
         "termination_penalty": failure,
     }
     if task.parkour:
+        terms["stand_still"] = joint_offset.norm(dim=-1) * ~moving
         # 二阶段只启用上游 23 项，普通地形的三个附加项仍在其原配方中维护。
         for name in ("body_orientation_l2", "stand_still_joint_vel_l2", "foot_slip"):
             del terms[name]

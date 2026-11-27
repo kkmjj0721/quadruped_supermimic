@@ -10,6 +10,7 @@
 | `rl/transition_adapter.py`、`mdp/reference_task.py` | `mdp_cfg/events_cfg.py`、`mdp/events.py` | 回合级高程mask，普通地形40%关闭；flat未在作者名单中，因此平地家族始终开启；当前随机格块映射discrete，台阶与斜坡映射对应普通地形 |
 | `mdp/reference_rewards.py`与集中reward配置 | `mdp_cfg/rewards_cfg.py`、`mdp/rewards.py`及`use_pretrain_terrain(True)` | 20项基础奖励的真实计分对齐源码，实际权重以集中配置为准；绊脚与calf接触在真实端生成0/1标签、想象端用监督事件概率计算期望惩罚。预训练删除stuck、cheat、穿透；时长方差保留来源的地形屏蔽方向；按用户要求，两阶段均追加与feet_air_time相同的命令门控（平移指令模长>0.1m/s或偏航指令绝对值>0.1rad/s），零速及阈值内指令不计该项；所有奖励乘一次dt，50Hz失败项为-2/step |
 | `body_orientation_l2`、`foot_slip`、`stand_still_joint_vel_l2` | 本项目`main@9c3a8ad5658dbef1acf4ff98997b64d01e45f90d`的`mdp/reference_rewards.py`及集中reward配置 | 按用户要求追加三项，权重均为−0.1，总计23项；倾斜项直接取步进后机身投影重力xy平方和，不归一化或裁剪。其余两项沿用平移命令模长加偏航绝对值的0.1阈值，滑移使用瞬时found与世界水平足速平方，站立使用关节速度平方和。保留PROOF原有feet_slide及其接触历史定义；复用现有状态与想象接触概率，不增加模型维度 |
+| `stand_still` | 同上`main@9c3a8ad`的站立奖励 | 普通地形按用户要求采用关节偏差平方和、权重−2.0，平移命令模长加偏航绝对值≤0.1时启用；二阶段Parkour保留上游二范数、权重−1.0及原命令门控 |
 | 接触与力矩辅助量 | 作者LocoLab [37e567d](https://github.com/syw-robotics/LocoLab/tree/37e567d81ec0198a8984b5c5650cd4489d3a56d3)，`velocity/mdp/{rewards,observations}.py` | 当前足净力先从MuJoCo对地反作用力转换为作用于机器人的世界力，再按正分量>1N后减0.5；滑移使用3物理步历史；非期望接触只计calf。当前资产足端属于calf，按每腿calf几何体净和并排除足几何。限幅前PD力矩从native仿射力模型与实际延迟ctrl恢复，施加力矩另外记录 |
 | 事件概率监督 | 本项目SuperMimic适配，官方PPO没有对应预测头 | 物理视图147维＋四元数4维，模型输入346／输出102；新增任意足绊脚及四腿calf接触logit，以真实标签的未加权BCE均值监督，原97维物理回归MSE保留。真实与想象奖励统一读取事件字段；不把概率校准或能力改善视为已验证 |
 | 默认站姿 | PROOF `assets/unitree.py::UNITREE_GO2_D435_CFG` | base z=.4，前thigh=.8、后thigh=1.0、calf=-1.5、hip左右±.1。新关节角配合当前MJCF原z=.29会穿地，因此高度一并对齐；PD及动作尺度不变 |

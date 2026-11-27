@@ -116,11 +116,9 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
             learn_started = time.perf_counter()
             runner.learn(min(remaining, until_checkpoint))
             timing.record_wall("learn_blocks", time.perf_counter() - learn_started)
-            # 参考在塌缩护栏首次预警时跳过该保存点。
-            if runner._collapse_strikes == 0:
-                checkpoint = log_dir / f"model_{runner.iteration}.pt"
-                runner.save(checkpoint)
-                print(f"[INFO] Saved checkpoint: {checkpoint}", flush=True)
+            checkpoint = log_dir / f"model_{runner.iteration}.pt"
+            runner.save(checkpoint)
+            print(f"[INFO] Saved checkpoint: {checkpoint}", flush=True)
     finally:
         runner.close()
         runner.env.close()

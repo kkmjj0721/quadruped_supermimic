@@ -28,7 +28,7 @@ class SuperMimicTrainConfig:
     max_iterations: int | None = None
     """覆盖runner目标总轮数；未指定时沿用配置，续训仍解释为目标总轮数。"""
     save_interval: int | None = None
-    """覆盖runner保存间隔；最后一轮也保存，塌缩护栏预警时跳过该保存点。"""
+    """覆盖runner保存间隔；最后一轮也保存，塌缩护栏预警不影响保存。"""
     log_interval: int | None = None
     """覆盖终端分区日志间隔；仅在指标汇总完成的轮次打印。"""
     metric_interval: int | None = None

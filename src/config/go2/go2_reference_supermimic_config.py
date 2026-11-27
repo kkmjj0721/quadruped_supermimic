@@ -286,7 +286,7 @@ class Go2ReferenceCfg(BaseConfig):
             lin_vel_z_l2 = -1.0
             ang_vel_xy_l2 = -0.05
             body_orientation_l2 = -0.1
-            stand_still = -1.0
+            stand_still = -2.0
             stand_still_joint_vel_l2 = -0.1
             foot_slip = -0.1
             joint_hip_deviation_l2 = -0.2
