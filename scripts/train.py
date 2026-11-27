@@ -31,18 +31,12 @@ def _print_help(stream) -> None:
 
 
 def main() -> None:
-    """校验任务标识并调用 SuperMimic 训练入口。"""
-    from src.tasks.locomotion.go2_supermimic.config.train_cfg import TASK_MODES
+    """调用 SuperMimic 训练入口，任务模式由配置分发表解析。"""
 
     if len(sys.argv) == 1 or sys.argv[1] in {"-h", "--help"}:
         _print_help(sys.stdout)
         return
     task_id = sys.argv[1]
-    if task_id not in TASK_MODES:
-        print(f"[ERROR] Unsupported training task: {task_id}", file=sys.stderr)
-        _print_help(sys.stderr)
-        raise SystemExit(2)
-
     from src.tasks.locomotion.go2_supermimic.cli import train_main
 
     train_main(task_id, sys.argv[2:])

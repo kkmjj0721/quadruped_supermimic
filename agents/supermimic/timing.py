@@ -88,12 +88,10 @@ class TrainingTiming:
                 self._events[key] = (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
             events = self._events[key]
             events[0].record(torch.cuda.current_stream(self.device))
-        try:
-            yield
-        finally:
-            if events is not None:
-                events[1].record(torch.cuda.current_stream(self.device))
-            self._pending.append((name, time.perf_counter() - started, events))
+        yield
+        if events is not None:
+            events[1].record(torch.cuda.current_stream(self.device))
+        self._pending.append((name, time.perf_counter() - started, events))
 
     def device_metrics(self):
         """仅在原标量回读完成后取事件值；重复调用不重复累计。"""
@@ -160,9 +158,4 @@ class TrainingTiming:
                                                    "wall": _statistics([row["wall_seconds"] for row in rows]),
                                                    "logging": _statistics([row["logging_seconds"] for row in rows])}
                                           for group, rows in groups.items()}},
-                "stages": stages,
-                "scope": {"host": "Host call intervals; CUDA work may still be queued",
-                          "cuda": "Stream event intervals including possible host submission gaps; not kernel-only time",
-                          "iteration_wall": "Host call wall; completion_boundary=false may leave device work pending; metrics_windows session wall includes boundary wait, guard and logging",
-                          "sampling": "Stage statistics cover sampled calls only; no extrapolation to unsampled iterations",
-                          "nesting": "Coarse model/control contain their detail children; save_total measures checkpoint serialization"}}
+                "stages": stages}

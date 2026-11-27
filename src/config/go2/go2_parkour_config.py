@@ -1,7 +1,6 @@
 # Copyright (c) 2026-2027 zh
 """内容：组合去除离散障碍的 PROOF 二阶段 Parkour 地形、命令、奖励与域随机化配置。"""
 
-from copy import deepcopy
 from math import pi
 
 from .go2_reference_supermimic_config import Go2ReferenceCfg
@@ -36,8 +35,8 @@ class ParkourRewardScales:
 
 
 def parkour_config(source: Go2ReferenceCfg) -> Go2ReferenceCfg:
-    """保留来源算法和网络预算，完整替换二阶段任务配方。"""
-    cfg = deepcopy(source)
+    """保留来源算法和网络预算，原地替换二阶段任务配方。"""
+    cfg = source
     cfg.terrain.mode = "parkour"
     cfg.terrain.seed = 17
     cfg.terrain.asset_path = "src/assets/terrains/proof_parkour_17.npz"

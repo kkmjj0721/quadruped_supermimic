@@ -23,7 +23,7 @@ from ..mdp.reference_task import Go2ReferenceTaskModel
 
 @dataclass(frozen=True)
 class PlaybackSource:
-    """原训练配置与CPU检查点；播放覆盖应施加到独立的配置副本。"""
+    """独立读取的训练配置与CPU检查点；播放覆盖直接作用于本次配置。"""
 
     cfg: Go2ReferenceCfg
     checkpoint: dict

@@ -1,10 +1,9 @@
 # Copyright (c) 2026-2027 zh
 """
 内容：
-    统一读取训练／播放配置快照、覆盖声明字段并验证声明字段。
+    统一读取训练／播放配置快照并覆盖声明字段。
 """
 
-from copy import deepcopy
 from dataclasses import fields
 
 from agents.supermimic.config import SuperMimicConfig
@@ -36,13 +35,12 @@ def apply_settings(target, values: dict, *, replace_mappings: bool = False) -> N
 
 
 def load_task_config(path: Path):
-    """读取一次外部JSON并在此边界应用和校验配置，返回原始快照。"""
+    """读取一次外部JSON并应用配置，返回共享已读取数据的快照。"""
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    settings = deepcopy(payload["config"] if "config" in payload else payload)
+    settings = payload["config"] if "config" in payload else payload
     cfg = configuration_for_settings(settings)
     complete = "config" in payload or set(cfg.to_dict()).issubset(settings)
     apply_settings(cfg, settings, replace_mappings=complete)
-    validate_config(cfg)
     return cfg, payload
 
 
@@ -54,14 +52,6 @@ def configuration_for_settings(settings: dict):
     if "terrain" in settings and "mode" in settings["terrain"] and settings["terrain"]["mode"] == "parkour":
         return parkour_config(Go2ReferenceCfg())
     return Go2ReferenceCfg()
-
-
-def validate_config(cfg) -> None:
-    """在配置入口识别当前支持的算法与地形模式。"""
-    if cfg.algorithm != "proof_teacher":
-        raise ValueError("SuperMimic requires the proof_teacher algorithm")
-    if cfg.terrain.mode not in ("flat", "rough", "parkour"):
-        raise ValueError("Unsupported SuperMimic terrain mode")
 
 
 def algorithm_config(cfg):

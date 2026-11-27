@@ -6,7 +6,6 @@ from __future__ import annotations
 from copy import deepcopy
 from collections import defaultdict
 from dataclasses import asdict
-import json
 from pathlib import Path
 import time
 
@@ -85,10 +84,6 @@ class SuperMimicRunner:
         self._collapse_strikes = 0
         self._guard_falls = 0.0
         self._guard_reset_steps = 0
-        if self.log_dir is not None:
-            # 算法配置同步提供TEXT面板，任务入口负责可直接查看的params快照。
-            self.logger.add_text("run/configuration", "```json\n" + json.dumps(
-                {"config": asdict(cfg), "execution": asdict(self.execution)}, indent=2) + "\n```")
 
     def _make_world_model(self):
         """默认使用通用状态模型；任务子类可指定其输出统计语义。"""
@@ -504,8 +499,7 @@ class SuperMimicRunner:
                 "config": asdict(self.config), "execution": asdict(self.execution), "control_enabled": self.control_enabled,
                 "actor": self.actor.state_dict(), "critic": self.critic.state_dict(), "world_model": self.model.state_dict(),
                 "learner": self.learner.state_dict(), "iteration": self.iteration, "real_steps": self.real_steps,
-                "imagined_steps": self.imagined_steps, "rng": torch.get_rng_state(),
-                "cuda_rng": torch.cuda.get_rng_state_all() if self.device.type == "cuda" else None}
+                "imagined_steps": self.imagined_steps}
 
     def save(self, path):
         path = Path(path)
@@ -523,21 +517,19 @@ class SuperMimicRunner:
         data = torch.load(path, map_location=self.device, weights_only=False)
         if data["format"] != self.spec.model_id:
             raise ValueError("SuperMimic checkpoint format or task specification mismatch")
-        same = {}
-        for name, checkpoint_key in (("actor", "actor"), ("critic", "critic"), ("model", "world_model")):
+        self.actor.load_state_dict(data["actor"], strict=True)
+        same = {"actor": True}
+        for name, checkpoint_key in (("critic", "critic"), ("model", "world_model")):
             state = data[checkpoint_key]
             current = getattr(self, name).state_dict()
             same[name] = set(current) == set(state) and all(current[key].shape == state[key].shape for key in current)
-        if not same["actor"]:
-            raise ValueError("Actor shape changed: no warm start is defined for this observation or architecture")
         saved_learner = data["learner"]
         counters = {name: data[name] if continue_run else 0 for name in ("iteration", "real_steps", "imagined_steps")}
-        self.actor.load_state_dict(data["actor"])
         if same["model"]:
-            self.model.load_state_dict(data["world_model"])
+            self.model.load_state_dict(data["world_model"], strict=True)
         same["critic"] = same["critic"] and not reset_critic
         if same["critic"]:
-            self.critic.load_state_dict(data["critic"])
+            self.critic.load_state_dict(data["critic"], strict=True)
         self.learner = self._make_learner()
         for name in ("actor", "model", "critic"):
             if same[name]:

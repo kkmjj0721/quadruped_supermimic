@@ -1,7 +1,6 @@
 # Copyright (c) 2026-2027 zh
 """内容：装配 Go2 SuperMimic 训练器，持久化课程与任务配置快照。"""
 
-from contextlib import contextmanager
 from dataclasses import fields
 import json
 from pathlib import Path
@@ -16,16 +15,6 @@ from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 from ..config.loading import algorithm_config
 from .transition_adapter import make_go2_supermimic_env
 from .world_model import Go2WorldModel
-
-
-@contextmanager
-def _save_timing(timing, name):
-    """记录包含失败尝试的保存墙钟，父项与子项不相加。"""
-    started = time.perf_counter()
-    try:
-        yield
-    finally:
-        timing.record_wall(name, time.perf_counter() - started)
 
 
 class Go2SuperMimicRunner(SuperMimicRunner):
@@ -115,8 +104,9 @@ class Go2SuperMimicRunner(SuperMimicRunner):
         return checkpoint
 
     def save(self, path):
-        with _save_timing(self.timing, "save_total"):
-            super().save(path)
+        started = time.perf_counter()
+        super().save(path)
+        self.timing.record_wall("save_total", time.perf_counter() - started)
 
     def load(self, path, *, continue_run=False, reset_critic=False):
         checkpoint = super().load(path, continue_run=continue_run, reset_critic=reset_critic)

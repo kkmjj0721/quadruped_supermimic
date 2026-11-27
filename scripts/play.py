@@ -81,8 +81,6 @@ def _resolve_checkpoint(cfg: PlayConfig) -> Path | None:
     """解析训练策略需要的检查点；虚拟策略不读取文件。"""
     if cfg.agent != "trained":
         return None
-    if cfg.checkpoint_file is None:
-        raise ValueError("Trained playback requires --checkpoint-file.")
     checkpoint = Path(cfg.checkpoint_file).expanduser().resolve()
     print(f"[INFO] Loading checkpoint: {checkpoint}", flush=True)
     return checkpoint
@@ -111,16 +109,10 @@ def run_play(task_id: str, cfg: PlayConfig) -> None:
 
 def main() -> None:
     """解析当前唯一支持的 SuperMimic 播放协议。"""
-    from src.tasks.locomotion.go2_supermimic.config.train_cfg import TASK_MODES
-
     if len(sys.argv) == 1 or sys.argv[1] in {"-h", "--help"}:
         _print_help(sys.stdout)
         return
     task_id = sys.argv[1]
-    if task_id not in TASK_MODES:
-        print(f"[ERROR] Unsupported playback task: {task_id}", file=sys.stderr)
-        _print_help(sys.stderr)
-        raise SystemExit(2)
     cfg = tyro.cli(PlayConfig, args=sys.argv[2:], prog=f"{sys.argv[0]} {task_id}", config=mjlab.TYRO_FLAGS)
     run_play(task_id, cfg)
 

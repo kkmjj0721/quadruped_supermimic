@@ -18,8 +18,6 @@ from importlib import metadata
 
 def check_install(device: str) -> None:
     """验证安装结果，不创建机器人任务或启动训练。"""
-    if sys.version_info[:2] != (3, 11):
-        raise RuntimeError(f"Python 3.11 is required; found {sys.version.split()[0]}.")
     print(f"Python {sys.version.split()[0]}: {sys.executable}")
 
     modules = {}
@@ -51,8 +49,6 @@ def check_install(device: str) -> None:
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"Device auto-detection selected {device}.")
-    if device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested, but PyTorch cannot access a CUDA device.")
     torch_device = "cuda:0" if device == "cuda" else "cpu"
     values = torch.tensor([1.0, 2.0], device=torch_device)
     if (values * 2).cpu().tolist() != [2.0, 4.0]:
@@ -89,11 +85,7 @@ def main() -> int:
         "--device", choices=("auto", "cpu", "cuda"), default="auto", help="Compute device to verify (default: auto)."
     )
     args = parser.parse_args()
-    try:
-        check_install(args.device)
-    except Exception as exc:
-        print(f"Installation check failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 1
+    check_install(args.device)
     return 0
 
 

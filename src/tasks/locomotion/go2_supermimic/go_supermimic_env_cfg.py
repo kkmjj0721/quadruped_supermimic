@@ -4,7 +4,6 @@
     装配Go2 SuperMimic基础物理环境，具体地形模式由config/env_cfgs.py选择。
 """
 
-from copy import deepcopy
 from math import log
 
 from mjlab.envs import ManagerBasedRlEnvCfg
@@ -78,7 +77,7 @@ def make_go2_supermimic_env_cfg(
         "reset_root": EventTermCfg(
             func=envs_mdp.reset_root_state_uniform,
             mode="reset",
-            params=deepcopy(cfg.reset.base_offset),
+            params=cfg.reset.base_offset,
         ),
         "reset_joints": EventTermCfg(
             func=envs_mdp.reset_joints_by_offset,
@@ -143,7 +142,7 @@ def make_go2_supermimic_env_cfg(
             events["push_robot"] = EventTermCfg(
                 func=envs_mdp.push_by_setting_velocity, mode="interval", is_global_time=True,
                 interval_range_s=(domain.push_interval_s, domain.push_interval_s),
-                params={"asset_cfg": SceneEntityCfg("robot"), "velocity_range": deepcopy(domain.push_velocity_range)},
+                params={"asset_cfg": SceneEntityCfg("robot"), "velocity_range": domain.push_velocity_range},
             )
 
     # ---------- 终止与任务逻辑边界 ----------

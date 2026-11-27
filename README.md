@@ -14,15 +14,14 @@
 
 ## 🚀 快速开始
 
-环境要求：Linux x86_64、Python 3.11；GPU 训练使用兼容 CUDA 13.0 的 NVIDIA 驱动。以下命令均在仓库根目录执行。
+环境要求：Linux x86_64、Python 3.11；GPU 训练使用兼容 CUDA 13.0 的 NVIDIA 驱动。先按 [安装指南](docs/setup.md) 安装 uv 并加入 PATH，以下命令均在仓库根目录执行。
 
 ```bash
 bash setup.sh --torch-backend cu130
-export PATH="$HOME/.local/bin:$PATH"
 uv run --no-sync python -B tools/check_install.py --device cuda
 ```
 
-安装脚本会准备 uv、Python 和项目虚拟环境。CPU 安装与更多选项见 [安装指南](docs/setup.md)；日常运行保留 `--no-sync`，沿用已安装的后端。
+安装脚本直接调用 uv 准备 Python 和项目虚拟环境。CPU 安装与更多选项见 [安装指南](docs/setup.md)；日常运行保留 `--no-sync`，沿用已安装的后端。
 
 ## 🧠 训练
 
@@ -65,7 +64,7 @@ uv run --no-sync python scripts/play.py Unitree-Go2-SuperMimic-Parkour \
   --checkpoint-file '<Parkour实验目录>/model_10000.pt' --num-envs 20
 ```
 
-查看器默认自动选择 MuJoCo 窗口或 Viser 浏览器界面，也可通过 `--viewer native` / `--viewer viser` 指定。添加 `--video True` 可将录像保存到实验目录的 `videos/play/`。
+查看器默认自动选择 MuJoCo 窗口或 Viser 浏览器界面，也可通过 `--viewer native` / `--viewer viser` 指定。添加 `--video True` 可将录像保存到实验目录的 `videos/play/`；无检查点的零动作／随机动作录像保存在当前目录的 `videos/play/`。
 
 没有检查点时，可用 `--agent zero --num-envs 1` 查看环境。SuperMimic 播放需要保留检查点同目录的 `task_config.json`。完整参数可在训练或播放命令后添加 `--help` 查看。
 

@@ -1,7 +1,5 @@
 # Copyright (c) 2026-2027 zh
-"""内容：从集中参数创建独立的Go2粗糙地形、平地及播放模式配置。"""
-
-from copy import deepcopy
+"""内容：原地应用Go2粗糙地形、平地及播放模式配置。"""
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 
@@ -14,12 +12,10 @@ from ..go_supermimic_env_cfg import make_go2_supermimic_env_cfg
 def resolve_go2_supermimic_cfg(
     go2_cfg: Go2ReferenceCfg | None = None, *, play: bool = False, terrain_mode: str | None = None,
 ) -> Go2ReferenceCfg:
-    """覆盖完整任务参数；返回副本以便adapter与纯Tensor任务使用同一语义。"""
+    """原地覆盖任务参数，adapter与纯Tensor任务共享同一配置。"""
     cfg = go2_cfg if go2_cfg is not None else Go2ReferenceCfg()
     if terrain_mode == "parkour" and cfg.terrain.mode != "parkour":
         cfg = parkour_config(cfg)
-    elif go2_cfg is not None:
-        cfg = deepcopy(cfg)
     if terrain_mode is not None:
         cfg.terrain.mode = terrain_mode
     if play:

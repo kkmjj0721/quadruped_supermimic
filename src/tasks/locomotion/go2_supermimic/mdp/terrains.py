@@ -80,7 +80,7 @@ class TerrainMap:
 
             self.generator, self.family_names = parkour_generator(cfg)
         else:
-            self.generator = None if self.plane else reference_generator(cfg)
+            self.generator = {"flat": lambda: None, "rough": lambda: reference_generator(cfg)}[cfg.mode]()
             self.family_names = ("flat",) if self.plane else tuple(self.generator.sub_terrains)
         self.size = tuple(cfg.patch_size_m) if self.plane else tuple(self.generator.size)
         weights = (1.,) if self.plane else tuple(term.proportion for term in self.generator.sub_terrains.values())
@@ -96,7 +96,7 @@ class TerrainMap:
     def entity_cfg(self):
         if self.plane:
             return clean_look(TerrainEntityCfg(terrain_type="plane"))
-        return clean_look(TerrainEntityCfg(terrain_type="generator", terrain_generator=deepcopy(self.generator), max_init_terrain_level=None))
+        return clean_look(TerrainEntityCfg(terrain_type="generator", terrain_generator=self.generator, max_init_terrain_level=None))
 
     def bind(self, origins):
         if self.plane:

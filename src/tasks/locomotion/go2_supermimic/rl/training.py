@@ -8,23 +8,18 @@ from __future__ import annotations
 
 from dataclasses import asdict, fields
 from datetime import datetime
-from importlib.metadata import version
 import json
-import os
 from pathlib import Path
-import sys
 import time
 
 import torch
-import yaml
 from mjlab.utils.torch import configure_torch_backends
 
 from agents.supermimic.config import ExecutionConfig, RUNNER_RUNTIME_FIELDS
 from src.config.go2.go2_reference_supermimic_config import Go2ReferenceCfg
 from src.config.go2.go2_parkour_config import parkour_config
-from src.runtime import configure_cuda_libdevice
 
-from ..config.loading import load_task_config, algorithm_config
+from ..config.loading import load_task_config
 from ..config.train_cfg import SuperMimicTrainConfig, TASK_MODES
 from .runner import make_go2_supermimic_runner
 
@@ -39,8 +34,6 @@ def _resolve_task_config(task_id: str, args: SuperMimicTrainConfig):
     cfg = load_task_config(source)[0] if source is not None else Go2ReferenceCfg()
     mode = TASK_MODES[task_id]
     if mode == "parkour" and cfg.terrain.mode != "parkour":
-        if resume is not None and args.continue_run:
-            raise ValueError("Rough-to-Parkour requires a hot start with continue_run=False")
         cfg = parkour_config(cfg)
     cfg.terrain.mode = mode
     for field, value in (("num_envs", args.num_envs), ("seed", args.seed)):
@@ -59,17 +52,14 @@ def _resolve_task_config(task_id: str, args: SuperMimicTrainConfig):
 # ---------- 运行快照与训练装配 ----------
 
 def _run_origin(task_id: str, args: SuperMimicTrainConfig, device: str, resume: Path | None, source: Path | None) -> dict:
-    """收集命令与依赖版本，路径在序列化边界显式转为字符串。"""
+    """记录运行入口参数和源路径，任务配置统一保存于 task_config.json。"""
     arguments = asdict(args)
     for name in ("resume", "task_config"):
         value = arguments[name]
         arguments[name] = str(value) if value is not None else None
     return {"task_id": task_id, "started_at": datetime.now().astimezone().isoformat(),
             "arguments": arguments, "device": device, "resume_from": str(resume) if resume is not None else None,
-            "task_config_source": str(source) if source is not None else None,
-            "command": list(sys.argv), "python": sys.version, "torch": str(torch.__version__),
-            "triton_libdevice_path": os.environ.get("TRITON_LIBDEVICE_PATH"),
-            "packages": {name: version(name) for name in ("mjlab", "mujoco", "mujoco-warp", "warp-lang", "tensorboard")}}
+            "task_config_source": str(source) if source is not None else None}
 
 
 def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
@@ -78,8 +68,6 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
     cfg, resume, source = _resolve_task_config(task_id, args)
     runtime = cfg.runner
     device = args.device
-    if torch.device(device).type == "cuda":
-        configure_cuda_libdevice()
     log_root = (Path(args.log_root).expanduser() / args.experiment_name).resolve()
     if cfg.terrain.mode == "parkour":
         log_root = log_root / "parkour"
@@ -108,17 +96,9 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
               f"cuda_graph={execution.cuda_graph}, detailed_timing={execution.detailed_timing}, "
               f"wm_bf16={execution.wm_bf16}, actor_bf16={execution.actor_bf16}, critic_bf16={execution.critic_bf16}, "
               f"timing_interval={execution.timing_interval}, metric_interval={execution.metric_interval}", flush=True)
-        # 快照反映JSON与CLI覆盖后的实际配置，普通YAML类型便于直接查看和安全回读。
+        # 任务配置由runner保存，入口仅记录本次运行来源。
         origin = _run_origin(task_id, args, device, resume, source)
         origin.update(seed=cfg.env.seed, num_envs=cfg.env.num_envs)
-        params = log_dir / "params"
-        params.mkdir()
-        settings = cfg.to_dict()
-        agent = {"algorithm": settings.pop("algorithm"), "config": asdict(algorithm_config(cfg)),
-                 "execution": asdict(execution), "runner": settings.pop("runner")}
-        settings.pop("algo")
-        for filename, values in (("env.yaml", settings), ("agent.yaml", agent), ("run.yaml", origin)):
-            (params / filename).write_text(yaml.safe_dump(values, sort_keys=False, allow_unicode=True), encoding="utf-8")
         runner.logger.add_text("run/origin", "```json\n" + json.dumps(
             origin, indent=2) + "\n```")
         if resume is not None:
@@ -163,12 +143,5 @@ def launch_training(task_id: str, args: SuperMimicTrainConfig) -> Path:
         "entry_training_transitions_per_second": training_steps / entry_seconds,
         "runner_internal_seconds": runner.elapsed,
     }
-    summary["scope"].update({
-        "entry_total": "launch_training entry through logger/environment close and final target-device synchronization; excludes this summary write",
-        "learn_blocks": "Inclusive host wall of runner.learn calls; includes prefill, setup and per-iteration logging, excludes outer checkpoint save",
-        "save_total": "Direct checkpoint serialization",
-        "process_wall": "Not measured here; the explicit training test launcher measures child-process wall externally",
-        "transitions": "New steps subtract restored counters; entry_real_transitions_per_second includes prefill, entry_training_transitions_per_second excludes it",
-    })
     (log_dir / "timing_summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return log_dir
